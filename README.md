@@ -12,39 +12,42 @@ An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh
 │   Agent      │       │                  │       │  in wazuh-alerts │
 └──────────────┘       └──────────────────┘       └────────┬─────────┘
                                                            │
-                                                           │ poll every 30s
-                                                           ▼
-┌──────────────┐       ┌──────────────────┐       ┌──────────────────┐
+                                                    poll every 30s
+                                                           │
+┌──────────────┐       ┌──────────────────┐       ┌────────▼─────────┐
 │    Wazuh     │       │  Claude API      │       │  LLM Triage      │
 │  Dashboard   │◀──────│  (Anthropic)     │◀──────│  Service         │
-│  view triage │  read │  AI analysis     │       │  (Python)        │
-│  results     │       │                  │       │                  │
+│  view triage │  read │  structured JSON │       │  + RAG + Metrics │
+│  + feedback  │       │  via tool_use    │       │  + Feedback Loop │
 └──────────────┘       └──────────────────┘       └──────────────────┘
 ```
 
-The triage service queries the `wazuh-alerts-*` OpenSearch index for alerts at or above a configurable severity threshold (default: rule level 10+). New alerts are sent to Claude with a structured SOC analyst prompt. Claude returns a standardized triage report that gets indexed into `wazuh-llm-triage` for review alongside the original alerts.
+## ML Engineering Features
 
-## What the AI Triage Provides
+This project goes beyond a basic API integration to demonstrate core ML engineering practices:
 
-Each alert sent to Claude returns a structured analysis:
+**Structured Output via Tool Use** — Claude returns typed JSON (not free text) using Anthropic's `tool_use` feature. Every triage has consistent fields: severity enum, confidence float, MITRE technique objects, benign boolean flags. This enables programmatic evaluation and metric computation. See `llm-triage/schemas.py`.
 
-- **Severity rating** (Critical / High / Medium / Low) based on actual threat level, not just Wazuh's rule number
-- **Plain-English summary** of what happened
-- **Likely cause** ranked by probability, noting whether it's likely benign or malicious
-- **Recommended actions** with specific commands, queries, and file paths
-- **MITRE ATT&CK mapping** for threat intelligence context
-- **False positive likelihood** so analysts can prioritize effectively
-- **Related alerts** to correlate with for fuller picture
+**Evaluation Framework** — A labeled dataset of 10 security alerts with ground-truth severity, false positive likelihood, MITRE mappings, and benign/malicious classification. The eval runner (`llm-triage/eval/evaluate.py`) scores Claude's output against ground truth and computes accuracy, within-1 agreement, MITRE F1 scores, and benign detection rates. This is the foundation for measuring whether prompt changes actually improve performance.
+
+**Experiment Tracking** — Systematic prompt engineering with full reproducibility. Define prompt variants (few-shot examples, persona changes, format constraints), run each against the eval dataset, and compare results in a structured table. Every experiment is saved with its prompt hash, model, scores, cost, and latency. See `notebooks/experiment_tracking.py`.
+
+**Cost & Latency Monitoring** — Per-call tracking of input/output tokens, estimated USD cost (by model), response latency, and quality signals (severity distribution, confidence stats). Aggregate metrics are logged periodically and available programmatically. See `llm-triage/metrics.py`.
+
+**Human-in-the-Loop Feedback** — Analysts can mark triage results as "agree," "disagree," or "partial" with optional severity/FP corrections. Feedback is stored in OpenSearch (`wazuh-llm-feedback` index) and can be exported as new evaluation dataset entries — closing the loop between model output and human ground truth. See `llm-triage/feedback.py`.
+
+**RAG Context Injection** — Optional retrieval-augmented generation using ChromaDB. Past alerts and their triage outcomes are embedded and stored locally. When a new alert arrives, similar historical alerts are retrieved and injected into the prompt, giving Claude environment-specific context like "this IP was flagged 3 times last week and confirmed benign." See `llm-triage/rag.py`.
 
 ## Tech Stack
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | SIEM | Wazuh 4.12.0 | Security event collection, rule-based detection |
-| Data Store | OpenSearch (via Wazuh Indexer) | Alert storage, search, and enriched triage results |
+| Data Store | OpenSearch (via Wazuh Indexer) | Alert storage, search, enriched triage + feedback |
 | Web UI | Wazuh Dashboard | Alert visualization and triage review |
-| AI Engine | Claude Sonnet 4.6 (Anthropic API) | Automated alert analysis and triage |
-| Triage Service | Python 3.12 | Orchestration between OpenSearch and Claude |
+| AI Engine | Claude Sonnet 4.6 (Anthropic API) | Structured alert analysis via tool_use |
+| Triage Service | Python 3.12 | Orchestration, metrics, RAG, feedback |
+| Vector DB | ChromaDB | RAG similarity search for historical alerts |
 | Infrastructure | Docker Compose | Single-node deployment of all services |
 
 ## Project Structure
@@ -67,12 +70,22 @@ wazuh-llm-security/
 │       ├── opensearch_dashboards.yml
 │       └── wazuh.yml
 │
-└── llm-triage/
-    ├── Dockerfile                   # Python 3.12-slim, non-root user
-    ├── requirements.txt             # anthropic, requests, python-dotenv
-    ├── triage_service.py            # Main service: polling, triage, indexing
-    └── prompts/
-        └── triage_system.txt        # Claude system prompt (SOC analyst role)
+├── llm-triage/
+│   ├── Dockerfile                   # Python 3.12-slim, non-root user
+│   ├── requirements.txt             # anthropic, requests, chromadb, pandas
+│   ├── triage_service.py            # Main service: polling, triage, indexing
+│   ├── schemas.py                   # Structured output schema (Anthropic tool_use)
+│   ├── metrics.py                   # Cost, latency, and quality tracking
+│   ├── feedback.py                  # Analyst feedback loop + export
+│   ├── rag.py                       # RAG context with ChromaDB
+│   ├── prompts/
+│   │   └── triage_system.txt        # Claude system prompt (SOC analyst role)
+│   └── eval/
+│       ├── labeled_dataset.json     # 10 alerts with ground-truth labels
+│       └── evaluate.py              # Scoring: accuracy, F1, within-1 agreement
+│
+└── notebooks/
+    └── experiment_tracking.py       # Prompt variant comparison + experiment log
 ```
 
 ## Quick Start
@@ -128,7 +141,7 @@ Download the [Wazuh agent](https://documentation.wazuh.com/current/installation-
 docker compose run --rm llm-triage python triage_service.py --test
 ```
 
-This sends 3 sample alerts (SSH brute force, hosts file modification, Domain Admins group change) to Claude and prints the triage analysis. Useful for verifying your API key works before going live.
+This sends 3 sample alerts (SSH brute force, hosts file modification, Domain Admins group change) to Claude and prints structured triage analysis with per-call cost and latency metrics.
 
 ### 7. Start Live Polling
 
@@ -137,7 +150,59 @@ docker compose up -d llm-triage
 docker compose logs -f llm-triage
 ```
 
-The service polls OpenSearch every 30 seconds for new alerts at level 10+, triages them through Claude, and writes results to the `wazuh-llm-triage` index.
+The service polls OpenSearch every 30 seconds for new alerts at level 10+, triages them through Claude, and writes structured results to the `wazuh-llm-triage` index.
+
+## Evaluation & Experimentation
+
+### Run the Evaluation Suite
+
+Score Claude's triage against the labeled dataset:
+
+```bash
+cd llm-triage
+python -m eval.evaluate --verbose
+```
+
+Output includes per-alert scoring and aggregate metrics:
+
+```
+EVALUATION RESULTS
+══════════════════
+Model:              claude-sonnet-4-6
+Alerts evaluated:   10/10
+
+Severity accuracy:  70.0% exact, 100.0% within-1
+FP accuracy:        80.0% exact
+MITRE F1:           95.0%
+Benign detection:   90.0%
+Avg confidence:     0.782
+
+Total cost:         $0.1850
+Avg latency:        1240ms
+```
+
+### Run Prompt Experiments
+
+Compare different prompt strategies:
+
+```bash
+cd notebooks
+
+# Run baseline
+python experiment_tracking.py --experiment baseline
+
+# Try few-shot examples
+python experiment_tracking.py --experiment few-shot
+
+# Try threat-hunter persona
+python experiment_tracking.py --experiment threat-hunter
+
+# Run all variants and compare
+python experiment_tracking.py --all
+
+# View comparison table
+python experiment_tracking.py --compare
+```
 
 ## Configuration
 
@@ -146,20 +211,45 @@ All configuration is in `.env`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | — | Your Anthropic API key (required) |
-| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model for triage (`claude-sonnet-4-6` or `claude-opus-4-6`) |
+| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model for triage |
 | `ALERT_LEVEL_THRESHOLD` | `10` | Minimum Wazuh rule level to triage (1-15) |
 | `POLL_INTERVAL_SECONDS` | `30` | How often to check for new alerts |
+| `RAG_ENABLED` | `false` | Enable ChromaDB context injection |
 
 ### Cost Estimates
 
 - **Claude Sonnet 4.6**: ~$0.01-0.02 per alert (recommended for production)
 - **Claude Opus 4.6**: ~$0.05-0.10 per alert (deeper analysis, higher cost)
+- **Full eval suite** (10 alerts): ~$0.15-0.20 with Sonnet
 
 At threshold 10+, most environments generate a handful of high-severity alerts per day, keeping costs well under $1/day.
 
-## Customizing the Triage Prompt
+## Sample Structured Output
 
-The system prompt that shapes Claude's analysis lives in `llm-triage/prompts/triage_system.txt`. You can customize it to fit your environment — add context about your network topology, specify which alerts to treat as known false positives, or adjust the output format.
+Claude returns typed JSON via Anthropic's `tool_use` feature:
+
+```json
+{
+  "severity": "LOW",
+  "confidence": 0.92,
+  "summary": "The W32Time service updated its SecureTimeLimits registry key during a routine NTP sync cycle.",
+  "likely_cause": [
+    {"explanation": "Routine NTP sync updates SecureTimeHigh/Low values automatically.", "benign": true},
+    {"explanation": "Manual system clock adjustment by an admin.", "benign": true}
+  ],
+  "actions": [
+    "Correlate with Windows Event ID 37 to confirm NTP sync.",
+    "Verify no unexpected clock drift: w32tm /query /status",
+    "Suppress via Wazuh rule tuning if confirmed routine."
+  ],
+  "mitre_attack": [
+    {"technique_id": "T1112", "technique_name": "Modify Registry"}
+  ],
+  "false_positive_likelihood": "HIGH",
+  "false_positive_reasoning": "SecureTimeHigh is updated automatically by W32Time during every NTP sync.",
+  "related_alerts": "Windows Event IDs 35, 37 (W32Time); Wazuh rule 750",
+}
+```
 
 ## Stopping and Restarting
 
@@ -172,36 +262,6 @@ docker compose up -d
 
 # Stop only the triage service (to save API costs when not needed)
 docker compose stop llm-triage
-```
-
-## Sample Output
-
-Here's Claude analyzing a real Windows registry integrity alert:
-
-```
-SEVERITY: LOW
-
-SUMMARY: The W32Time service updated its SecureTimeLimits registry key during
-a routine NTP synchronization cycle. This is expected system behavior.
-
-LIKELY CAUSE:
-1. Routine NTP time synchronization — W32Time updates SecureTimeHigh/Low
-   values after each sync cycle (most likely).
-2. Manual system clock adjustment by an administrator.
-
-ACTIONS:
-1. Correlate with Event ID 37 (W32Time time adjustment) to confirm NTP sync.
-2. Verify no unexpected clock drift: w32tm /query /status
-3. Suppress this alert via Wazuh rule tuning if confirmed routine.
-
-MITRE ATT&CK: T1112 – Modify Registry (mapping technically correct but
-overstates risk here)
-
-FALSE POSITIVE LIKELIHOOD: High — SecureTimeHigh is a dynamic value updated
-automatically by the W32Time service during every NTP sync cycle.
-
-RELATED ALERTS: Windows Event IDs 35, 37 (W32Time); Wazuh rule 750 firing
-repeatedly in short intervals would warrant escalation.
 ```
 
 ## License

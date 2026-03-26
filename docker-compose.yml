@@ -120,6 +120,10 @@ services:
       - INDEXER_URL=https://wazuh.indexer:9200
       - INDEXER_USERNAME=admin
       - INDEXER_PASSWORD=SecretPassword
+      - RAG_ENABLED=${RAG_ENABLED:-false}
+      - CHROMA_PERSIST_DIR=/data/chromadb
+    volumes:
+      - llm-triage-chromadb:/data/chromadb
     depends_on:
       - wazuh.manager
       - wazuh.indexer
@@ -142,3 +146,4 @@ volumes:
   wazuh-indexer-data:
   wazuh-dashboard-config:
   wazuh-dashboard-custom:
+  llm-triage-chromadb:

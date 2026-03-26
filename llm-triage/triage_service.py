@@ -1,13 +1,21 @@
 """
 Wazuh → Claude LLM Triage Service
 
-Polls the Wazuh API for high-severity alerts and sends them to Claude
-for automated triage and enrichment. Results are logged and optionally
-written back to OpenSearch for display in the Wazuh Dashboard.
+Polls OpenSearch for high-severity Wazuh alerts and sends them to Claude
+for automated triage and enrichment. Results are logged, written back to
+OpenSearch, and optionally enriched with RAG context from similar past alerts.
+
+Features:
+  - Structured JSON output via Anthropic tool_use (not free text)
+  - Per-call cost, latency, and quality metrics
+  - RAG context injection from ChromaDB (similar past alerts)
+  - Analyst feedback loop for human-in-the-loop correction
+  - Evaluation framework for measuring triage accuracy
 
 Usage:
-    python triage_service.py          # Run the polling loop
-    python triage_service.py --test   # Run once with a sample alert (no Wazuh needed)
+    python triage_service.py              # Run the polling loop
+    python triage_service.py --test       # Sample alerts (no Wazuh needed)
+    python triage_service.py --test 0     # Test specific alert index
 """
 
 import os
@@ -15,12 +23,16 @@ import sys
 import json
 import time
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
 import requests
 from requests.auth import HTTPBasicAuth
+
+from schemas import TRIAGE_TOOL, triage_to_flat_text
+from metrics import MetricsTracker
+from rag import AlertMemory
 
 # ---------------------------------------------------------------------------
 # Configuration — all from environment variables (set in .env / docker-compose)
@@ -41,6 +53,10 @@ INDEXER_URL = os.environ.get("INDEXER_URL", "https://wazuh.indexer:9200")
 INDEXER_USERNAME = os.environ.get("INDEXER_USERNAME", "admin")
 INDEXER_PASSWORD = os.environ.get("INDEXER_PASSWORD", "")
 
+# RAG settings
+RAG_ENABLED = os.environ.get("RAG_ENABLED", "false").lower() == "true"
+CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "/data/chromadb")
+
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
@@ -60,7 +76,7 @@ PROMPT_DIR = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT = (PROMPT_DIR / "triage_system.txt").read_text()
 
 # ---------------------------------------------------------------------------
-# Wazuh API client
+# Wazuh alert client (queries OpenSearch directly)
 # ---------------------------------------------------------------------------
 
 
@@ -133,35 +149,47 @@ class WazuhClient:
 
 
 # ---------------------------------------------------------------------------
-# Claude triage client
+# Claude triage client — now with structured output + metrics + RAG
 # ---------------------------------------------------------------------------
 
 
 class TriageClient:
-    """Sends alerts to Claude for analysis and parses the response."""
+    """Sends alerts to Claude for analysis using structured tool_use output."""
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, alert_memory: AlertMemory = None):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
+        self.metrics = MetricsTracker()
+        self.alert_memory = alert_memory
 
-    def triage_alert(self, alert: dict) -> str:
+    def triage_alert(self, alert: dict) -> dict:
         """
-        Send a single alert to Claude for triage analysis.
+        Send a single alert to Claude for structured triage analysis.
 
         Args:
             alert: A Wazuh alert dict (raw JSON from the API)
 
         Returns:
-            The triage analysis as a string
+            A structured triage dict with typed fields, or a fallback
+            dict with an error message.
         """
-        # Format the alert as readable JSON for Claude
         alert_text = json.dumps(alert, indent=2, default=str)
 
-        user_prompt = (
-            "Analyze the following Wazuh security alert and provide your "
-            "triage assessment:\n\n"
+        # Build user prompt with optional RAG context
+        parts = []
+
+        if self.alert_memory and self.alert_memory.is_available:
+            similar = self.alert_memory.retrieve_similar(alert)
+            rag_context = self.alert_memory.format_context_for_prompt(similar)
+            if rag_context:
+                parts.append(rag_context)
+
+        parts.append(
+            "Analyze the following Wazuh security alert and submit your "
+            "triage assessment using the submit_triage tool.\n\n"
             f"```json\n{alert_text}\n```"
         )
+        user_prompt = "\n".join(parts)
 
         logger.info(
             "Sending alert to Claude (rule: %s, level: %s)",
@@ -169,19 +197,86 @@ class TriageClient:
             alert.get("rule", {}).get("level", "unknown"),
         )
 
+        timer = self.metrics.start_timer()
         try:
             message = self.client.messages.create(
                 model=self.model,
                 max_tokens=1500,
                 system=SYSTEM_PROMPT,
+                tools=[TRIAGE_TOOL],
+                tool_choice={"type": "tool", "name": "submit_triage"},
                 messages=[{"role": "user", "content": user_prompt}],
             )
-            analysis = message.content[0].text
-            logger.info("Received triage response from Claude (%d chars)", len(analysis))
-            return analysis
+
+            # Extract structured output from tool call
+            triage_result = None
+            for block in message.content:
+                if block.type == "tool_use" and block.name == "submit_triage":
+                    triage_result = block.input
+                    break
+
+            if triage_result is None:
+                # Fallback: model didn't use the tool (shouldn't happen with tool_choice)
+                logger.warning("Claude did not return structured output")
+                fallback_text = ""
+                for block in message.content:
+                    if hasattr(block, "text"):
+                        fallback_text += block.text
+                triage_result = {
+                    "severity": "MEDIUM",
+                    "summary": fallback_text[:200] if fallback_text else "Analysis unavailable",
+                    "likely_cause": [{"explanation": "Unable to parse structured output", "benign": False}],
+                    "actions": ["Review alert manually"],
+                    "mitre_attack": [],
+                    "false_positive_likelihood": "MEDIUM",
+                    "false_positive_reasoning": "Structured parsing failed",
+                    "related_alerts": "None",
+                    "confidence": 0.0,
+                    "_parse_error": True,
+                }
+
+            # Record metrics
+            self.metrics.record_call(
+                timer, message, triage_result, alert, self.model
+            )
+
+            # Store in RAG memory for future context
+            if self.alert_memory and self.alert_memory.is_available:
+                self.alert_memory.store_alert(alert, triage_result)
+
+            logger.info(
+                "Triage complete: severity=%s confidence=%.2f",
+                triage_result.get("severity"),
+                triage_result.get("confidence", 0),
+            )
+            return triage_result
+
         except anthropic.APIError as e:
             logger.error("Claude API error: %s", e)
-            return f"[TRIAGE ERROR] Claude API call failed: {e}"
+            self.metrics.record_call(
+                timer, None, None, alert, self.model, error=str(e)
+            )
+            return {
+                "severity": "MEDIUM",
+                "summary": f"[TRIAGE ERROR] Claude API call failed: {e}",
+                "likely_cause": [{"explanation": "API error", "benign": False}],
+                "actions": ["Retry triage", "Review alert manually"],
+                "mitre_attack": [],
+                "false_positive_likelihood": "MEDIUM",
+                "false_positive_reasoning": "Unable to analyze due to API error",
+                "related_alerts": "None",
+                "confidence": 0.0,
+                "_api_error": str(e),
+            }
+
+    def triage_alert_text(self, alert: dict) -> str:
+        """
+        Backward-compatible wrapper that returns flat text.
+        Calls triage_alert() internally and converts the structured
+        output to readable text.
+        """
+        result = self.triage_alert(alert)
+        return triage_to_flat_text(result)
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +293,11 @@ class OpenSearchWriter:
         self.verify_ssl = False
         self.index_name = "wazuh-llm-triage"
 
-    def write_enriched_alert(self, original_alert: dict, analysis: str) -> bool:
+    def write_enriched_alert(
+        self, original_alert: dict, triage: dict, model: str
+    ) -> bool:
         """
-        Write the original alert + Claude's analysis to a dedicated index.
+        Write the original alert + structured triage to a dedicated index.
 
         Returns True if successful, False otherwise.
         """
@@ -214,8 +311,19 @@ class OpenSearchWriter:
                 "agent_id": original_alert.get("agent", {}).get("id"),
                 "full_log": original_alert.get("full_log", ""),
             },
-            "llm_analysis": analysis,
-            "model_used": CLAUDE_MODEL,
+            "triage": {
+                "severity": triage.get("severity"),
+                "summary": triage.get("summary"),
+                "likely_cause": triage.get("likely_cause", []),
+                "actions": triage.get("actions", []),
+                "mitre_attack": triage.get("mitre_attack", []),
+                "false_positive_likelihood": triage.get("false_positive_likelihood"),
+                "false_positive_reasoning": triage.get("false_positive_reasoning"),
+                "related_alerts": triage.get("related_alerts"),
+                "confidence": triage.get("confidence", 0),
+            },
+            "model_used": model,
+            "feedback_status": "pending",
         }
 
         try:
@@ -264,7 +372,7 @@ class AlertTracker:
 
 
 # ---------------------------------------------------------------------------
-# Sample alert for --test mode
+# Sample alerts for --test mode
 # ---------------------------------------------------------------------------
 
 SAMPLE_ALERTS = [
@@ -402,13 +510,17 @@ def run_test_mode(alert_index: int = None):
             print(f"Source IP: {data['srcip']}")
         print(f"Log: {alert.get('full_log', 'N/A')[:120]}")
 
-        analysis = triage.triage_alert(alert)
+        result = triage.triage_alert(alert)
+        analysis_text = triage_to_flat_text(result)
 
         print(f"\n{'='*60}")
-        print("CLAUDE TRIAGE ANALYSIS:")
+        print("CLAUDE TRIAGE ANALYSIS (Structured):")
         print(f"{'='*60}")
-        print(analysis)
+        print(analysis_text)
         print(f"{'='*60}")
+
+    # Print session metrics
+    triage.metrics.log_summary()
 
 
 def run_poll_loop():
@@ -418,6 +530,7 @@ def run_poll_loop():
     logger.info("  Claude model:  %s", CLAUDE_MODEL)
     logger.info("  Min level:     %d", ALERT_LEVEL_THRESHOLD)
     logger.info("  Poll interval: %ds", POLL_INTERVAL_SECONDS)
+    logger.info("  RAG enabled:   %s", RAG_ENABLED)
 
     if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY.startswith("sk-ant-REPLACE"):
         logger.error(
@@ -431,8 +544,18 @@ def run_poll_loop():
         )
         sys.exit(1)
 
+    # Initialize RAG memory if enabled
+    alert_memory = None
+    if RAG_ENABLED:
+        alert_memory = AlertMemory(persist_dir=CHROMA_PERSIST_DIR)
+        if alert_memory.is_available:
+            logger.info("RAG context enabled with ChromaDB")
+        else:
+            logger.warning("RAG requested but ChromaDB unavailable — continuing without")
+            alert_memory = None
+
     wazuh = WazuhClient(INDEXER_URL, INDEXER_USERNAME, INDEXER_PASSWORD)
-    triage = TriageClient(ANTHROPIC_API_KEY, CLAUDE_MODEL)
+    triage = TriageClient(ANTHROPIC_API_KEY, CLAUDE_MODEL, alert_memory=alert_memory)
     writer = OpenSearchWriter(INDEXER_URL, INDEXER_USERNAME, INDEXER_PASSWORD)
     tracker = AlertTracker()
 
@@ -457,21 +580,27 @@ def run_poll_loop():
                     rule.get("description", "")[:80],
                 )
 
-                analysis = triage.triage_alert(alert)
+                result = triage.triage_alert(alert)
+                analysis_text = triage_to_flat_text(result)
 
                 # Log the analysis to stdout (visible in docker compose logs)
                 print(f"\n{'='*60}")
                 print(f"ALERT: {rule.get('description', 'Unknown')}")
                 print(f"LEVEL: {rule.get('level', '?')}")
                 print(f"{'='*60}")
-                print(analysis)
+                print(analysis_text)
                 print(f"{'='*60}\n")
 
-                # Write to OpenSearch
-                writer.write_enriched_alert(alert, analysis)
+                # Write structured result to OpenSearch
+                writer.write_enriched_alert(alert, result, CLAUDE_MODEL)
+
+            # Periodically log aggregate metrics
+            if tracker.count > 0 and tracker.count % 10 == 0:
+                triage.metrics.log_summary()
 
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully...")
+            triage.metrics.log_summary()
             break
         except Exception as e:
             logger.error("Error in poll loop: %s", e, exc_info=True)

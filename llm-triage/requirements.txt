@@ -1,4 +1,11 @@
+# Core dependencies
 anthropic>=0.40.0
 requests>=2.31.0
 urllib3>=2.0.0
 python-dotenv>=1.0.0
+
+# RAG — vector similarity search for historical alert context
+chromadb>=0.4.0
+
+# Evaluation — data analysis and visualization
+pandas>=2.0.0

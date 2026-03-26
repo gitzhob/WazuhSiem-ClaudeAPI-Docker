@@ -1,0 +1,51 @@
+# ========================================
+# Secrets — NEVER commit these
+# ========================================
+.env
+*.pem
+*.key
+*.crt
+*.p12
+
+# Wazuh generated certificates (created by generate-indexer-certs.yml)
+config/wazuh_indexer_ssl_certs/*.pem
+config/wazuh_indexer_ssl_certs/*.key
+
+# ========================================
+# Docker persistent data volumes
+# ========================================
+# These are created by Docker Compose and can be huge.
+# They live in named Docker volumes, but if you ever
+# bind-mount data dirs, exclude them here.
+wazuh-indexer-data/
+wazuh-manager-data/
+wazuh-dashboard-data/
+
+# ========================================
+# Python / llm-triage service
+# ========================================
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# ========================================
+# IDE and OS junk
+# ========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
+
+# ========================================
+# Logs (local debugging only)
+# ========================================
+*.log
+logs/

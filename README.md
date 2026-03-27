@@ -163,23 +163,32 @@ cd llm-triage
 python -m eval.evaluate --verbose
 ```
 
-Output includes per-alert scoring and aggregate metrics:
+Output includes per-alert scoring and aggregate metrics. To compare models, use the `--model` flag:
 
+```bash
+python -m eval.evaluate --model claude-opus-4-6 --verbose
 ```
-EVALUATION RESULTS
-══════════════════
-Model:              claude-sonnet-4-6
-Alerts evaluated:   10/10
 
-Severity accuracy:  70.0% exact, 100.0% within-1
-FP accuracy:        80.0% exact
-MITRE F1:           95.0%
-Benign detection:   90.0%
-Avg confidence:     0.782
+### Model Comparison: Sonnet 4.6 vs Opus 4.6
 
-Total cost:         $0.1850
-Avg latency:        1240ms
-```
+Both models were evaluated against the same 10-alert labeled dataset with identical system prompts.
+
+| Metric | Sonnet 4.6 | Opus 4.6 |
+|--------|-----------|----------|
+| **Severity accuracy** (exact) | 70.0% | **90.0%** |
+| **Severity accuracy** (within-1) | 100.0% | 100.0% |
+| **False positive accuracy** | 80.0% | **100.0%** |
+| **MITRE ATT&CK F1** | **95.0%** | 60.0% |
+| **Benign detection** | 90.0% | 90.0% |
+| **Avg confidence** | 0.782 | **0.900** |
+| **Cost per eval** (10 alerts) | **$0.19** | $0.91 |
+| **Avg latency** | **1,240ms** | 16,442ms |
+
+**Key findings:**
+
+Opus 4.6 is substantially better at the two most important triage tasks — correctly rating severity (90% vs 70%) and identifying false positives (100% vs 80%). It also reports higher self-confidence scores that align with its improved accuracy. However, it scored lower on MITRE ATT&CK technique identification (60% vs 95% F1), suggesting it may be more selective about which techniques it maps rather than matching Wazuh's broader tagging.
+
+The trade-off is cost and speed: Opus costs ~5x more per alert ($0.09 vs $0.02) and takes ~13x longer (16s vs 1.2s). For production use with a small alert volume, Opus may be worth the premium. For high-volume environments, Sonnet provides strong accuracy at a fraction of the cost, with the option to escalate ambiguous cases to Opus.
 
 ### Understanding Ground Truth and Scoring
 

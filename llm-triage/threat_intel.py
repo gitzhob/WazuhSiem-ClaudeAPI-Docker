@@ -30,7 +30,6 @@ logger = logging.getLogger("llm-triage.threat_intel")
 
 try:
     import chromadb
-    from chromadb.config import Settings
     CHROMA_AVAILABLE = True
 except ImportError:
     CHROMA_AVAILABLE = False
@@ -152,13 +151,7 @@ class ThreatIntelStore:
             self.collection = None
             return
 
-        self.client = chromadb.Client(
-            Settings(
-                chroma_db_impl="duckdb+parquet",
-                persist_directory=persist_dir,
-                anonymized_telemetry=False,
-            )
-        )
+        self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection(
             name=self.COLLECTION_NAME,
             metadata={"description": "Threat intelligence IOCs"},

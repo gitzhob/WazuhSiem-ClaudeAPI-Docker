@@ -29,7 +29,7 @@ logger = logging.getLogger("llm-triage.rag")
 # ChromaDB is optional — gracefully degrade if not installed
 try:
     import chromadb
-    from chromadb.config import Settings
+    pass  # PersistentClient needs no extra imports
 
     CHROMA_AVAILABLE = True
 except ImportError:
@@ -56,13 +56,7 @@ class AlertMemory:
             self.collection = None
             return
 
-        self.client = chromadb.Client(
-            Settings(
-                chroma_db_impl="duckdb+parquet",
-                persist_directory=persist_dir,
-                anonymized_telemetry=False,
-            )
-        )
+        self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection(
             name=self.COLLECTION_NAME,
             metadata={"description": "Wazuh alert history with triage outcomes"},

@@ -27,7 +27,9 @@ COPY prompts/ prompts/
 COPY eval/ eval/
 
 # Don't run as root inside the container (security best practice)
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser \
+    && mkdir -p /data/chromadb \
+    && chown -R appuser:appuser /data
 USER appuser
 
 # Default command — run the polling loop

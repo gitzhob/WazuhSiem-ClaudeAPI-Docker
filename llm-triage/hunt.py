@@ -439,7 +439,6 @@ def run_hunt(
         usage = getattr(message, "usage", None)
         cost = 0.0
         if usage:
-            from metrics import MetricsTracker
             cost = MetricsTracker._calculate_cost(
                 CLAUDE_MODEL, usage.input_tokens, usage.output_tokens
             )

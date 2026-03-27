@@ -110,7 +110,7 @@ class WazuhClient:
                         {
                             "range": {
                                 "timestamp": {
-                                    "gte": "now-30m",
+                                    "gte": "now-24h",
                                     "lte": "now",
                                 }
                             }

@@ -338,6 +338,97 @@ Claude returns typed JSON via Anthropic's `tool_use` feature:
 }
 ```
 
+## Getting Started (Non-Technical Guide)
+
+New to security tools or Docker? This section walks you through the basics.
+
+### What Does This Tool Do?
+
+Think of it like a smart security camera system for your computer. Wazuh is the camera — it watches everything happening on your machine (logins, file changes, programs running, network connections). When something looks suspicious, it creates an alert. The problem is, security systems create *hundreds* of alerts per day, and most of them are harmless. That's where Claude comes in.
+
+Claude acts like a security analyst on your team who reads every single alert and tells you: "This one is harmless — Windows was just updating itself" or "This one is serious — someone may be trying to access accounts they shouldn't." It does this automatically, 24/7, in seconds.
+
+### What You Need Before Starting
+
+1. **Docker Desktop** — This is the app that runs everything. Download it free from [docker.com](https://www.docker.com/products/docker-desktop/). Install it, open it, and make sure it says "Running" in the bottom left.
+
+2. **An Anthropic API Key** — This is like a password that lets the tool talk to Claude. Go to [console.anthropic.com](https://console.anthropic.com/settings/keys), create an account, and generate a key. It starts with `sk-ant-`. You'll need to add billing (the tool costs roughly 1-2 cents per alert analyzed).
+
+3. **8 GB of RAM for Docker** — On Windows, open a text editor and create a file at `C:\Users\YourName\.wslconfig` with these lines, then restart Docker Desktop:
+   ```
+   [wsl2]
+   memory=8GB
+   ```
+
+### Step-by-Step Setup
+
+**Step 1 — Download the project.** Open PowerShell (search for it in the Start menu) and type:
+```
+git clone https://github.com/gitzhob/WazuhSiem-ClaudeAPI-Docker.git
+cd WazuhSiem-ClaudeAPI-Docker
+```
+
+**Step 2 — Add your API key.** In the project folder, copy the file `.env.example` and rename the copy to `.env`. Open `.env` in Notepad and replace the placeholder API key with your real one. Save and close.
+
+**Step 3 — Set up OpenSearch.** This is a one-time command. In PowerShell:
+```
+wsl -d Ubuntu -u root -- sysctl -w vm.max_map_count=262144
+```
+
+**Step 4 — Generate security certificates.** In PowerShell:
+```
+docker compose -f generate-indexer-certs.yml run --rm generator
+```
+
+**Step 5 — Start everything.** In PowerShell:
+```
+docker compose up -d
+```
+Wait about 60 seconds. Five containers will start — you'll see green "Running" next to each.
+
+**Step 6 — Open the dashboard.** Go to `https://localhost` in your browser. You'll get a security warning — that's normal, click "Advanced" then "Proceed." Log in with username `admin` and password `SecretPassword`.
+
+### Daily Use
+
+Once everything is running, you don't need to do much. The tool works automatically in the background. Here are the things you might want to do:
+
+**Check on triage results** — Open the Wazuh Dashboard at `https://localhost`, go to Discover, and select the `wazuh-llm-triage*` index pattern. You'll see every alert Claude has analyzed with severity ratings, explanations, and recommended actions.
+
+**Run a threat hunt** — This asks Claude to review a batch of recent events and look for hidden attack patterns. In PowerShell:
+```
+docker compose run --rm llm-triage python hunt.py --hours 24
+```
+
+**Stop the tool** (to save resources or API costs):
+```
+docker compose stop
+```
+
+**Start it back up:**
+```
+docker compose up -d
+```
+
+**Stop only the AI analysis** (keep monitoring active but don't spend API credits):
+```
+docker compose stop llm-triage
+```
+
+### What the Severity Levels Mean
+
+When Claude analyzes an alert, it assigns one of four severity levels:
+
+- **CRITICAL** — Immediate attention needed. Something is actively being exploited or compromised. Example: someone disabled your antivirus remotely.
+- **HIGH** — Investigate soon. A known attack technique was detected but may not have succeeded yet. Example: repeated failed login attempts from an unknown IP.
+- **MEDIUM** — Worth reviewing. Unusual activity that could be suspicious or could be a normal admin task. Example: a new program was added to startup.
+- **LOW** — Probably harmless. Routine system activity that triggered a rule. Example: Windows updated a registry key during a normal update cycle.
+
+### Troubleshooting
+
+- **"Fetched 0 alerts"** — The tool is running but no new security events match the threshold. This is normal if your machine has been idle. Lower the `ALERT_LEVEL_THRESHOLD` in `.env` to `5` to see more results.
+- **Dashboard won't load** — Make sure Docker Desktop is running and all containers show "Running." Try `docker compose restart` in PowerShell.
+- **API errors** — Check that your Anthropic API key in `.env` is correct and your account has billing set up.
+
 ## Stopping and Restarting
 
 ```bash

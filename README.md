@@ -1,25 +1,68 @@
 # Wazuh + LLM Security Triage
 
-An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh.com/) with Anthropic's Claude API for automated alert triage. When Wazuh detects a high-severity security event on a monitored endpoint, the LLM triage service sends the raw alert to Claude for instant analysis — severity assessment, likely root cause, recommended actions, MITRE ATT&CK mapping, and false positive estimation — then writes the enriched result back to OpenSearch for review in the Wazuh Dashboard.
+An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh.com/) with Anthropic's Claude API for automated alert triage and proactive threat hunting. The system operates in two modes: **reactive triage** (individual high-severity alerts analyzed in real time) and **proactive hunting** (batch analysis of low-to-medium severity events to find attack patterns no single alert would reveal). All results are written to OpenSearch for review in the Wazuh Dashboard.
+
+### Key Features
+
+- **Automated Alert Triage** — Claude analyzes every high-severity alert with severity rating, root cause, MITRE ATT&CK mapping, and false positive estimation
+- **Proactive Threat Hunting** — Batch analysis of hundreds of events to find multi-step attack chains, lateral movement, and persistence mechanisms
+- **20 Custom Detection Rules** — Sysmon-powered rules for encoded PowerShell, LOLBin abuse, process masquerading, registry persistence, and more
+- **Threat Intelligence IOCs** — ChromaDB-backed indicator of compromise database injected into Claude's analysis context
+- **Detection-as-Code** — Claude suggests new Wazuh XML rules when it finds patterns that existing rules miss
+- **Structured Output** — Typed JSON via Anthropic's `tool_use` (not free text), enabling programmatic evaluation
+- **Evaluation Framework** — Labeled dataset with ground-truth scoring for severity accuracy, MITRE F1, and benign detection
+- **RAG Context** — Historical alert memory via ChromaDB gives Claude environment-specific context
+- **Human Feedback Loop** — Analysts mark results as agree/disagree, corrections export as new ground truth
+- **Cost & Latency Metrics** — Per-call token tracking, USD cost estimation, and quality signal monitoring
+- **Experiment Tracking** — Systematic prompt engineering with reproducible comparison tables
 
 ## Architecture
 
 ```
-┌──────────────┐       ┌──────────────────┐       ┌──────────────────┐
-│   Windows    │       │  Wazuh Manager   │       │  Wazuh Indexer   │
-│   Endpoint   │──────▶│  (event parsing  │──────▶│  (OpenSearch)    │
-│  w/ Wazuh    │ 1514  │   & rule engine) │       │  stores alerts   │
-│   Agent      │       │                  │       │  in wazuh-alerts │
-└──────────────┘       └──────────────────┘       └────────┬─────────┘
-                                                           │
-                                                    poll every 30s
-                                                           │
-┌──────────────┐       ┌──────────────────┐       ┌────────▼─────────┐
-│    Wazuh     │       │  Claude API      │       │  LLM Triage      │
-│  Dashboard   │◀──────│  (Anthropic)     │◀──────│  Service         │
-│  view triage │  read │  structured JSON │       │  + RAG + Metrics │
-│  + feedback  │       │  via tool_use    │       │  + Feedback Loop │
-└──────────────┘       └──────────────────┘       └──────────────────┘
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│ Windows Endpoint │     │  Wazuh Manager   │     │  Wazuh Indexer   │
+│  + Wazuh Agent   │────▶│  + Custom Rules  │────▶│  (OpenSearch)    │
+│  + Sysmon        │1514 │  (threat_hunting │     │  wazuh-alerts-*  │
+│                  │     │   .xml, 20 rules)│     │                  │
+└──────────────────┘     └──────────────────┘     └──────┬───────────┘
+                                                         │
+                              ┌───────────────────────────┤
+                              │                           │
+                       poll every 30s              batch query (hunt)
+                              │                           │
+                              ▼                           ▼
+                    ┌──────────────────┐       ┌──────────────────┐
+                    │  Reactive Triage │       │  Proactive Hunt  │
+                    │  (triage_service │       │  (hunt.py)       │
+                    │   .py)           │       │  5 focus areas   │
+                    └────────┬─────────┘       └────────┬─────────┘
+                             │                          │
+                             ▼                          ▼
+                    ┌──────────────────────────────────────────────┐
+                    │              Claude API (Anthropic)          │
+                    │  structured JSON via tool_use                │
+                    │  + RAG context (ChromaDB)                    │
+                    │  + Threat Intel IOCs                         │
+                    │  + Cost/latency metrics                      │
+                    └──────────────────┬──────────────────────────-┘
+                                       │
+              ┌────────────────────────-┼─────────────────────────┐
+              ▼                         ▼                         ▼
+    ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+    │  wazuh-llm-      │     │  wazuh-llm-      │     │  wazuh-llm-      │
+    │  triage (index)  │     │  hunts (index)   │     │  feedback (index) │
+    │  per-alert       │     │  batch findings  │     │  analyst verdicts│
+    │  analysis        │     │  + suggested     │     │  + corrections   │
+    │                  │     │    detection rules│     │                  │
+    └──────────────────┘     └──────────────────┘     └──────────────────┘
+              │                         │                         │
+              └─────────────────────────┼─────────────────────────┘
+                                        ▼
+                              ┌──────────────────┐
+                              │  Wazuh Dashboard │
+                              │  (view all       │
+                              │   results)       │
+                              └──────────────────┘
 ```
 
 ## ML Engineering Features
@@ -43,11 +86,14 @@ This project goes beyond a basic API integration to demonstrate core ML engineer
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | SIEM | Wazuh 4.12.0 | Security event collection, rule-based detection |
-| Data Store | OpenSearch (via Wazuh Indexer) | Alert storage, search, enriched triage + feedback |
-| Web UI | Wazuh Dashboard | Alert visualization and triage review |
-| AI Engine | Claude Sonnet 4.6 (Anthropic API) | Structured alert analysis via tool_use |
-| Triage Service | Python 3.12 | Orchestration, metrics, RAG, feedback |
-| Vector DB | ChromaDB | RAG similarity search for historical alerts |
+| Endpoint Telemetry | Sysmon | Process creation, network, file, registry, DNS events |
+| Data Store | OpenSearch (via Wazuh Indexer) | Alert storage, triage results, hunt findings, feedback |
+| Web UI | Wazuh Dashboard | Visualization of alerts, triage, and hunt results |
+| AI Engine | Claude Sonnet/Opus 4.6 (Anthropic API) | Structured analysis via tool_use |
+| Triage Service | Python 3.12 | Reactive alert triage with metrics and RAG |
+| Hunt Service | Python 3.12 | Proactive batch event analysis across 5 focus areas |
+| Threat Intel | Python 3.12 + ChromaDB | IOC management and context injection |
+| Vector DB | ChromaDB | RAG similarity search + IOC storage |
 | Infrastructure | Docker Compose | Single-node deployment of all services |
 
 ## Project Structure
@@ -106,8 +152,8 @@ wazuh-llm-security/
 ### 1. Clone and Configure
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/wazuh-llm-security.git
-cd wazuh-llm-security
+git clone https://github.com/gitzhob/WazuhSiem-ClaudeAPI-Docker.git
+cd WazuhSiem-ClaudeAPI-Docker
 cp .env.example .env
 # Edit .env and add your Anthropic API key + set strong passwords
 ```
@@ -303,6 +349,16 @@ All configuration is in `.env`:
 | `POLL_INTERVAL_SECONDS` | `30` | How often to check for new alerts |
 | `RAG_ENABLED` | `false` | Enable ChromaDB context injection |
 
+### OpenSearch Indices
+
+The system writes to three custom indices (in addition to Wazuh's built-in `wazuh-alerts-*`):
+
+| Index | Written By | Contains |
+|-------|-----------|----------|
+| `wazuh-llm-triage` | triage_service.py | Per-alert structured triage (severity, confidence, MITRE, actions) |
+| `wazuh-llm-hunts` | hunt.py | Batch hunt findings, evidence, suggested detection rules |
+| `wazuh-llm-feedback` | feedback.py | Analyst verdicts (agree/disagree/partial) with corrections |
+
 ### Cost Estimates
 
 - **Claude Sonnet 4.6**: ~$0.01-0.02 per alert (recommended for production)
@@ -310,6 +366,29 @@ All configuration is in `.env`:
 - **Full eval suite** (10 alerts): ~$0.15-0.20 with Sonnet
 
 At threshold 10+, most environments generate a handful of high-severity alerts per day, keeping costs well under $1/day.
+
+## Viewing Results in the Dashboard
+
+All triage results, hunt findings, and analyst feedback are stored in OpenSearch and viewable in the Wazuh Dashboard at `https://localhost`.
+
+### Setting Up Index Patterns
+
+To view LLM results in the dashboard, create index patterns for each data type:
+
+1. Open the Wazuh Dashboard and click the hamburger menu (top left)
+2. Go to **Dashboard Management** → **Index Patterns** → **Create index pattern**
+3. Create patterns for each index:
+
+| Index Pattern | Contains |
+|--------------|----------|
+| `wazuh-llm-triage*` | Per-alert triage results (severity, confidence, MITRE, actions) |
+| `wazuh-llm-hunts*` | Threat hunt findings (batch analysis, suggested rules) |
+| `wazuh-llm-feedback*` | Analyst feedback (agree/disagree verdicts, corrections) |
+
+4. Select `timestamp` as the time field for each pattern
+5. Go to **Discover** (from the hamburger menu), select your index pattern, and set the time range to "Last 24 hours"
+
+You can filter by severity, confidence, MITRE technique, or any other structured field. Each document represents one complete analysis from Claude with all fields available for search and visualization.
 
 ## Sample Structured Output
 
@@ -392,12 +471,20 @@ Wait about 60 seconds. Five containers will start — you'll see green "Running"
 
 Once everything is running, you don't need to do much. The tool works automatically in the background. Here are the things you might want to do:
 
-**Check on triage results** — Open the Wazuh Dashboard at `https://localhost`, go to Discover, and select the `wazuh-llm-triage*` index pattern. You'll see every alert Claude has analyzed with severity ratings, explanations, and recommended actions.
+**Check on triage results** — Open the Wazuh Dashboard at `https://localhost`, go to **Discover**, and select the `wazuh-llm-triage*` index pattern. You'll see every alert Claude has analyzed with severity ratings, explanations, and recommended actions. See the [Viewing Results in the Dashboard](#viewing-results-in-the-dashboard) section above for setup.
 
-**Run a threat hunt** — This asks Claude to review a batch of recent events and look for hidden attack patterns. In PowerShell:
+**Run a threat hunt** — This asks Claude to review a batch of recent events and look for hidden attack patterns. Think of it like asking a detective to review all the security camera footage from the last day, instead of just responding to alarms. In PowerShell:
 ```
 docker compose run --rm llm-triage python hunt.py --hours 24
 ```
+You can focus the hunt on specific attack types like `--focus lateral` (hackers moving between machines), `--focus persistence` (hackers setting up backdoors), or `--focus exfiltration` (data being stolen).
+
+**Load threat intelligence** — This teaches the system about known bad IPs, domains, and file hashes so Claude can flag them instantly:
+```
+docker compose run --rm llm-triage python threat_intel.py --load-defaults
+```
+
+**View hunt findings** — In the Wazuh Dashboard, select the `wazuh-llm-hunts*` index pattern in Discover. Each hunt result shows what Claude found, what evidence it used, and what MITRE ATT&CK techniques it identified.
 
 **Stop the tool** (to save resources or API costs):
 ```

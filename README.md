@@ -181,6 +181,22 @@ Total cost:         $0.1850
 Avg latency:        1240ms
 ```
 
+### Understanding Ground Truth and Scoring
+
+The evaluation framework scores Claude's triage output against **ground truth** — human-determined correct answers for each alert. The included dataset (`llm-triage/eval/labeled_dataset.json`) contains 10 alerts with labels I assigned manually based on security domain knowledge: the expected severity, false positive likelihood, MITRE ATT&CK techniques, and whether the root cause is benign or malicious.
+
+**Important:** These labels are a starting point, not gospel. If you deploy this in your own environment, you should review and adjust the ground truth labels to match your security posture and operational context. What counts as "CRITICAL" in a small business may only be "HIGH" in an enterprise with layered defenses. The evaluation is only as good as the human labels it scores against.
+
+The recommended workflow for building accurate ground truth over time:
+
+1. Start with the included dataset to get baseline scores
+2. Run the triage service in production and have analysts review results
+3. Use the feedback loop (`feedback.py`) to mark Claude's assessments as agree/disagree with corrections
+4. Export analyst feedback as new evaluation entries: the `FeedbackStore.export_as_eval_dataset()` method converts corrections into ground truth format
+5. Re-run the eval suite to measure whether prompt changes or model upgrades actually improve accuracy against your real-world labels
+
+The RAG system (`rag.py`) also benefits from this cycle — as more alerts are triaged and verified by analysts, ChromaDB accumulates environment-specific context. When a new alert resembles one that was previously reviewed, that historical context is injected into Claude's prompt, improving accuracy for your specific infrastructure over time.
+
 ### Run Prompt Experiments
 
 Compare different prompt strategies:

@@ -15,9 +15,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code and prompts
+# Copy application code, modules, and prompts
 COPY triage_service.py .
+COPY schemas.py .
+COPY metrics.py .
+COPY feedback.py .
+COPY rag.py .
 COPY prompts/ prompts/
+COPY eval/ eval/
 
 # Don't run as root inside the container (security best practice)
 RUN useradd --create-home appuser

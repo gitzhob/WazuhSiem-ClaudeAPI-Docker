@@ -61,8 +61,12 @@ wazuh-llm-security/
 │
 ├── config/
 │   ├── certs.yml                    # Node definitions for TLS cert generation
+│   ├── sysmon/
+│   │   └── sysmonconfig.xml         # Sysmon config for endpoint telemetry
 │   ├── wazuh_cluster/
-│   │   └── wazuh_manager.conf       # Wazuh Manager ossec.conf
+│   │   ├── wazuh_manager.conf       # Wazuh Manager ossec.conf
+│   │   └── rules/
+│   │       └── threat_hunting.xml   # Custom detection rules (level 8-14)
 │   ├── wazuh_indexer/
 │   │   ├── wazuh.indexer.yml        # OpenSearch configuration
 │   │   └── internal_users.yml       # OpenSearch user definitions
@@ -73,13 +77,16 @@ wazuh-llm-security/
 ├── llm-triage/
 │   ├── Dockerfile                   # Python 3.12-slim, non-root user
 │   ├── requirements.txt             # anthropic, requests, chromadb, pandas
-│   ├── triage_service.py            # Main service: polling, triage, indexing
+│   ├── triage_service.py            # Reactive: poll + triage individual alerts
+│   ├── hunt.py                      # Proactive: batch event analysis for threat hunting
+│   ├── threat_intel.py              # IOC feed management for RAG context
 │   ├── schemas.py                   # Structured output schema (Anthropic tool_use)
 │   ├── metrics.py                   # Cost, latency, and quality tracking
 │   ├── feedback.py                  # Analyst feedback loop + export
 │   ├── rag.py                       # RAG context with ChromaDB
 │   ├── prompts/
-│   │   └── triage_system.txt        # Claude system prompt (SOC analyst role)
+│   │   ├── triage_system.txt        # Reactive triage prompt (SOC analyst)
+│   │   └── hunt_system.txt          # Proactive hunt prompt (threat hunter)
 │   └── eval/
 │       ├── labeled_dataset.json     # 10 alerts with ground-truth labels
 │       └── evaluate.py              # Scoring: accuracy, F1, within-1 agreement
@@ -151,6 +158,61 @@ docker compose logs -f llm-triage
 ```
 
 The service polls OpenSearch every 30 seconds for new alerts at level 10+, triages them through Claude, and writes structured results to the `wazuh-llm-triage` index.
+
+## Proactive Threat Hunting
+
+The system operates in two modes. **Reactive mode** (triage_service.py) handles individual high-severity alerts in real time. **Hunt mode** (hunt.py) takes a fundamentally different approach — it pulls batches of low-to-medium severity events and asks Claude to analyze them as a group, looking for attack patterns that no single alert would reveal.
+
+### Install Sysmon (Recommended)
+
+Sysmon gives Wazuh process-level visibility — command-line arguments, network connections, DNS queries, and file creation. Without it, Claude can only hunt through Windows Event Logs and file integrity events. With it, Claude can spot encoded PowerShell, LOLBin abuse, suspicious parent-child process chains, and C2 callbacks.
+
+Download [Sysmon](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon) from Microsoft, then install with the included config:
+
+```powershell
+sysmon64.exe -accepteula -i config\sysmon\sysmonconfig.xml
+```
+
+### Run a Threat Hunt
+
+```bash
+# General sweep of the last hour
+docker compose run --rm llm-triage python hunt.py
+
+# Focus on lateral movement, look back 4 hours
+docker compose run --rm llm-triage python hunt.py --focus lateral --hours 4
+
+# Focus areas: general, lateral, persistence, exfiltration, execution
+docker compose run --rm llm-triage python hunt.py --focus persistence
+
+# Run continuous hunts every hour
+docker compose run --rm llm-triage python hunt.py --continuous
+```
+
+Hunt findings are written to the `wazuh-llm-hunts` OpenSearch index and include structured findings with evidence, MITRE ATT&CK mappings, and — when Claude identifies a gap — suggested Wazuh detection rules that would catch the pattern automatically next time.
+
+### Custom Detection Rules
+
+The project includes 20 custom Wazuh rules (`config/wazuh_cluster/rules/threat_hunting.xml`) that fire on Sysmon events indicating common attack techniques: encoded PowerShell, LOLBin abuse (certutil, mshta, rundll32), Office macros spawning shells, process masquerading, executables in suspicious paths, registry persistence, and process tampering.
+
+### Threat Intelligence IOCs
+
+The threat intel module (`threat_intel.py`) manages indicators of compromise that get injected into Claude's context via RAG. When an alert contains a known-bad IP, domain, hash, or command pattern, Claude automatically receives context like "this IP was flagged as a C2 server in our threat feed."
+
+```bash
+# Load default IOC set
+docker compose run --rm llm-triage python threat_intel.py --load-defaults
+
+# Load custom IOCs from file
+docker compose run --rm llm-triage python threat_intel.py --load my_iocs.json
+
+# Check if a value is in the IOC database
+docker compose run --rm llm-triage python threat_intel.py --check 203.0.113.42
+```
+
+### Detection-as-Code
+
+When Claude identifies a suspicious pattern during a hunt that Wazuh's existing rules don't cover, it generates suggested Wazuh XML rules as part of its findings. This closes the loop: the AI teaches the SIEM what to watch for, so next time the pattern appears it's caught in real time without needing an LLM call.
 
 ## Evaluation & Experimentation
 

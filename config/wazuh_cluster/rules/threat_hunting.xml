@@ -1,0 +1,234 @@
+<!--
+  Custom Wazuh Rules for LLM-Assisted Threat Hunting
+
+  These rules fire on Sysmon events that indicate suspicious behavior.
+  Level 10+ alerts are automatically triaged by Claude.
+  Level 6-9 alerts are collected for batch threat hunting analysis.
+
+  Rule ID range: 100100-100199 (custom local rules)
+-->
+
+<group name="sysmon,threat_hunting,">
+
+  <!-- ================================================================= -->
+  <!-- PROCESS CREATION (Sysmon Event ID 1)                              -->
+  <!-- ================================================================= -->
+
+  <!-- Encoded PowerShell command — classic post-exploitation -->
+  <rule id="100100" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)-enc[oded]*\s+[A-Za-z0-9+/=]{20,}</field>
+    <description>Sysmon: Encoded PowerShell command detected (T1059.001)</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1027</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,powershell,</group>
+  </rule>
+
+  <!-- PowerShell download cradle patterns -->
+  <rule id="100101" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(Invoke-WebRequest|IWR|Invoke-RestMethod|IRM|Net\.WebClient|DownloadString|DownloadFile|Start-BitsTransfer|wget|curl)</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)powershell</field>
+    <description>Sysmon: PowerShell download cradle detected (T1059.001)</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1105</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,powershell,download,</group>
+  </rule>
+
+  <!-- Process running from Users\Public — common malware drop location -->
+  <rule id="100102" level="10">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)C:\\Users\\Public\\</field>
+    <description>Sysmon: Process execution from Users\Public directory (T1204)</description>
+    <mitre>
+      <id>T1204</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,suspicious_path,</group>
+  </rule>
+
+  <!-- Process running from Temp directory -->
+  <rule id="100103" level="8">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\(Temp|tmp)\\[^\\]+\.(exe|dll|scr)</field>
+    <description>Sysmon: Executable running from Temp directory (T1204)</description>
+    <mitre>
+      <id>T1204</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,suspicious_path,</group>
+  </rule>
+
+  <!-- LOLBin: certutil used for download -->
+  <rule id="100104" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)certutil</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(-urlcache|-split|-encode|-decode|http)</field>
+    <description>Sysmon: CertUtil LOLBin abuse for file download (T1218)</description>
+    <mitre>
+      <id>T1218</id>
+      <id>T1105</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,lolbin,</group>
+  </rule>
+
+  <!-- LOLBin: mshta executing remote content -->
+  <rule id="100105" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)mshta</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(http|javascript|vbscript)</field>
+    <description>Sysmon: MSHTA executing remote/script content (T1218.005)</description>
+    <mitre>
+      <id>T1218.005</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,lolbin,</group>
+  </rule>
+
+  <!-- LOLBin: rundll32 with suspicious arguments -->
+  <rule id="100106" level="10">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)rundll32</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(javascript|http|\\Temp\\|\\Downloads\\|shell32.*ShellExec_RunDLL)</field>
+    <description>Sysmon: Suspicious rundll32 execution (T1218.011)</description>
+    <mitre>
+      <id>T1218.011</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,lolbin,</group>
+  </rule>
+
+  <!-- Suspicious parent-child: Word/Excel spawning cmd/powershell -->
+  <rule id="100107" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)(WINWORD|EXCEL|POWERPNT|OUTLOOK)\.EXE</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)(cmd\.exe|powershell|wscript|cscript|mshta)</field>
+    <description>Sysmon: Office application spawning shell — possible macro execution (T1566.001)</description>
+    <mitre>
+      <id>T1566.001</id>
+      <id>T1059</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,macro,</group>
+  </rule>
+
+  <!-- Process masquerading: svchost.exe not in System32 -->
+  <rule id="100108" level="14">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.originalFileName" type="pcre2">(?i)svchost\.exe</field>
+    <field name="win.eventdata.image" negate="yes" type="pcre2">(?i)C:\\Windows\\System32\\svchost\.exe</field>
+    <description>Sysmon: svchost.exe running from non-standard path — likely masquerading (T1036.005)</description>
+    <mitre>
+      <id>T1036.005</id>
+    </mitre>
+    <group>sysmon_event1,threat_hunting,masquerade,</group>
+  </rule>
+
+  <!-- ================================================================= -->
+  <!-- NETWORK CONNECTIONS (Sysmon Event ID 3)                           -->
+  <!-- ================================================================= -->
+
+  <!-- PowerShell making network connections -->
+  <rule id="100110" level="10">
+    <if_sid>61605</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)powershell</field>
+    <description>Sysmon: PowerShell outbound network connection (T1071)</description>
+    <mitre>
+      <id>T1071</id>
+      <id>T1059.001</id>
+    </mitre>
+    <group>sysmon_event3,threat_hunting,network,</group>
+  </rule>
+
+  <!-- Connection from Temp/Downloads directory -->
+  <rule id="100111" level="10">
+    <if_sid>61605</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\(Temp|Downloads|Users\\Public)\\</field>
+    <description>Sysmon: Network connection from suspicious directory (T1071)</description>
+    <mitre>
+      <id>T1071</id>
+    </mitre>
+    <group>sysmon_event3,threat_hunting,network,suspicious_path,</group>
+  </rule>
+
+  <!-- ================================================================= -->
+  <!-- FILE CREATION (Sysmon Event ID 11)                                -->
+  <!-- ================================================================= -->
+
+  <!-- Executable dropped in Startup folder -->
+  <rule id="100120" level="12">
+    <if_sid>61613</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\\Startup\\.*\.(exe|dll|bat|cmd|ps1|vbs|js|hta)</field>
+    <description>Sysmon: Executable dropped in Startup folder — persistence (T1547.001)</description>
+    <mitre>
+      <id>T1547.001</id>
+    </mitre>
+    <group>sysmon_event11,threat_hunting,persistence,</group>
+  </rule>
+
+  <!-- Script file dropped in Temp -->
+  <rule id="100121" level="8">
+    <if_sid>61613</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\\Temp\\.*\.(ps1|bat|cmd|vbs|js|hta)</field>
+    <description>Sysmon: Script file created in Temp directory (T1105)</description>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+    <group>sysmon_event11,threat_hunting,file_drop,</group>
+  </rule>
+
+  <!-- ================================================================= -->
+  <!-- REGISTRY PERSISTENCE (Sysmon Event ID 13)                         -->
+  <!-- ================================================================= -->
+
+  <!-- Run key modification -->
+  <rule id="100130" level="10">
+    <if_sid>61614</if_sid>
+    <field name="win.eventdata.targetObject" type="pcre2">(?i)\\CurrentVersion\\Run</field>
+    <description>Sysmon: Registry Run key modified — possible persistence (T1547.001)</description>
+    <mitre>
+      <id>T1547.001</id>
+    </mitre>
+    <group>sysmon_event13,threat_hunting,persistence,registry,</group>
+  </rule>
+
+  <!-- Image File Execution Options — debugger hijack -->
+  <rule id="100131" level="12">
+    <if_sid>61614</if_sid>
+    <field name="win.eventdata.targetObject" type="pcre2">(?i)Image File Execution Options\\.*\\Debugger</field>
+    <description>Sysmon: IFEO debugger set — possible execution hijack (T1546.012)</description>
+    <mitre>
+      <id>T1546.012</id>
+    </mitre>
+    <group>sysmon_event13,threat_hunting,persistence,registry,</group>
+  </rule>
+
+  <!-- ================================================================= -->
+  <!-- DNS QUERIES (Sysmon Event ID 22)                                  -->
+  <!-- ================================================================= -->
+
+  <!-- DNS query from PowerShell (unusual — may indicate C2) -->
+  <rule id="100140" level="8">
+    <if_sid>61624</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)powershell</field>
+    <description>Sysmon: DNS query initiated by PowerShell (T1071.004)</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>sysmon_event22,threat_hunting,dns,</group>
+  </rule>
+
+  <!-- ================================================================= -->
+  <!-- PROCESS TAMPERING (Sysmon Event ID 25)                            -->
+  <!-- ================================================================= -->
+
+  <!-- Process hollowing / herpaderping detected -->
+  <rule id="100150" level="14">
+    <if_sid>61650</if_sid>
+    <description>Sysmon: Process tampering detected — possible hollowing or herpaderping (T1055.012)</description>
+    <mitre>
+      <id>T1055.012</id>
+    </mitre>
+    <group>sysmon_event25,threat_hunting,evasion,</group>
+  </rule>
+
+</group>

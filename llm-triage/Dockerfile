@@ -21,6 +21,8 @@ COPY schemas.py .
 COPY metrics.py .
 COPY feedback.py .
 COPY rag.py .
+COPY hunt.py .
+COPY threat_intel.py .
 COPY prompts/ prompts/
 COPY eval/ eval/
 

@@ -1,0 +1,157 @@
+<!--
+  Sysmon Configuration for Wazuh + LLM Threat Hunting
+
+  This config focuses on high-value events for threat detection:
+  - Process creation with command-line args (Event ID 1)
+  - Network connections (Event ID 3)
+  - File creation in suspicious locations (Event ID 11)
+  - Registry persistence mechanisms (Event ID 13)
+  - DNS queries (Event ID 22)
+  - Process tampering / hollowing (Event ID 25)
+
+  Based on SwiftOnSecurity's sysmon-config with modifications
+  for LLM-assisted threat hunting. Tuned to reduce noise while
+  capturing the events Claude needs for pattern analysis.
+
+  Install: sysmon64.exe -accepteula -i sysmonconfig.xml
+  Update:  sysmon64.exe -c sysmonconfig.xml
+-->
+
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <CheckRevocation/>
+
+  <EventFiltering>
+
+    <!-- Event ID 1: Process Creation ================================== -->
+    <!-- Log all process creation — this is the most valuable data source
+         for threat hunting. Claude uses command-line args to detect:
+         - Encoded PowerShell (T1059.001)
+         - LOLBin abuse (T1218)
+         - Suspicious parent-child relationships
+         - Processes running from unusual paths -->
+    <RuleGroup name="ProcessCreate" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <!-- Exclude extremely noisy, low-value processes -->
+        <Image condition="is">C:\Windows\System32\conhost.exe</Image>
+        <Image condition="is">C:\Windows\System32\audiodg.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchFilterHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\backgroundTaskHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\RuntimeBroker.exe</Image>
+        <Image condition="is">C:\Windows\System32\taskhostw.exe</Image>
+        <Image condition="is">C:\Windows\System32\sihost.exe</Image>
+        <ParentImage condition="is">C:\Windows\System32\svchost.exe</ParentImage>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- Event ID 3: Network Connection ================================ -->
+    <!-- Log outbound connections — critical for detecting:
+         - C2 callbacks (T1071)
+         - Data exfiltration (T1041)
+         - Lateral movement (T1021)
+         Exclude noisy internal/system traffic -->
+    <RuleGroup name="NetworkConnect" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+        <Image condition="is">C:\Program Files\Windows Defender\MsMpEng.exe</Image>
+        <Image condition="is">C:\Windows\SystemApps\Microsoft.Windows.Search_cw5n1h2txyewy\SearchApp.exe</Image>
+        <DestinationPort condition="is">443</DestinationPort>
+        <DestinationPort condition="is">80</DestinationPort>
+        <!-- Keep connections on unusual ports — they're more interesting -->
+      </NetworkConnect>
+      <NetworkConnect onmatch="include">
+        <!-- Always log connections from scripting engines -->
+        <Image condition="contains">powershell</Image>
+        <Image condition="contains">cmd.exe</Image>
+        <Image condition="contains">wscript</Image>
+        <Image condition="contains">cscript</Image>
+        <Image condition="contains">mshta</Image>
+        <Image condition="contains">python</Image>
+        <!-- Log connections to non-standard ports -->
+        <DestinationPort condition="is">4444</DestinationPort>
+        <DestinationPort condition="is">5555</DestinationPort>
+        <DestinationPort condition="is">8080</DestinationPort>
+        <DestinationPort condition="is">8443</DestinationPort>
+        <DestinationPort condition="is">9090</DestinationPort>
+        <!-- Log connections from unusual directories -->
+        <Image condition="contains">\Users\Public\</Image>
+        <Image condition="contains">\Temp\</Image>
+        <Image condition="contains">\Downloads\</Image>
+        <Image condition="contains">\AppData\</Image>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- Event ID 11: File Creation ==================================== -->
+    <!-- Log files created in suspicious locations — detects:
+         - Payload drops (T1105)
+         - Persistence via startup folder (T1547.001)
+         - Script drops in temp directories -->
+    <RuleGroup name="FileCreate" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename condition="contains">\Startup\</TargetFilename>
+        <TargetFilename condition="contains">\Start Menu\</TargetFilename>
+        <TargetFilename condition="contains">\Users\Public\</TargetFilename>
+        <TargetFilename condition="end with">.exe</TargetFilename>
+        <TargetFilename condition="end with">.dll</TargetFilename>
+        <TargetFilename condition="end with">.bat</TargetFilename>
+        <TargetFilename condition="end with">.cmd</TargetFilename>
+        <TargetFilename condition="end with">.ps1</TargetFilename>
+        <TargetFilename condition="end with">.vbs</TargetFilename>
+        <TargetFilename condition="end with">.js</TargetFilename>
+        <TargetFilename condition="end with">.hta</TargetFilename>
+        <TargetFilename condition="end with">.scr</TargetFilename>
+        <TargetFilename condition="contains">\Temp\</TargetFilename>
+        <TargetFilename condition="contains">\Downloads\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- Event ID 13: Registry Value Set =============================== -->
+    <!-- Log registry changes to persistence locations — detects:
+         - Run key persistence (T1547.001)
+         - Service creation (T1543.003)
+         - Image File Execution Options hijack (T1546.012) -->
+    <RuleGroup name="RegistryEvent" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\RunOnce</TargetObject>
+        <TargetObject condition="contains">\Policies\Explorer\Run</TargetObject>
+        <TargetObject condition="contains">\Image File Execution Options\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Winlogon\Shell</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Winlogon\Userinit</TargetObject>
+        <TargetObject condition="contains">\Services\</TargetObject>
+        <TargetObject condition="contains">\Environment\</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- Event ID 22: DNS Query ======================================== -->
+    <!-- Log DNS queries — critical for detecting:
+         - C2 domain resolution (T1071.004)
+         - DNS tunneling (T1572)
+         - Known malicious domains -->
+    <RuleGroup name="DnsQuery" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.windows.com</QueryName>
+        <QueryName condition="end with">.windowsupdate.com</QueryName>
+        <QueryName condition="end with">.office.com</QueryName>
+        <QueryName condition="end with">.office365.com</QueryName>
+        <QueryName condition="end with">.bing.com</QueryName>
+        <QueryName condition="end with">.live.com</QueryName>
+        <QueryName condition="end with">.msftncsi.com</QueryName>
+        <QueryName condition="end with">.msedge.net</QueryName>
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      </DnsQuery>
+    </RuleGroup>
+
+    <!-- Event ID 25: Process Tampering ================================ -->
+    <!-- Always log — detects process hollowing (T1055.012) and
+         herpaderping, which are advanced evasion techniques -->
+    <RuleGroup name="ProcessTampering" groupRelation="or">
+      <ProcessTampering onmatch="include">
+        <Image condition="contains">.</Image>
+      </ProcessTampering>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>

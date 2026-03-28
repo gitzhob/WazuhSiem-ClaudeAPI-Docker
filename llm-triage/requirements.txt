@@ -26,3 +26,7 @@ sentence-transformers>=2.2.0
 
 # Evaluation — data analysis and visualization
 pandas>=2.0.0
+
+# Dashboard — Streamlit UI for monitoring triage results
+streamlit>=1.30.0
+plotly>=5.18.0

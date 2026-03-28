@@ -39,6 +39,7 @@ from requests.auth import HTTPBasicAuth
 
 from schemas import HuntResult, hunt_to_flat_text
 from metrics import MetricsTracker
+from callbacks import MetricsCallbackHandler
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -339,32 +340,38 @@ def run_hunt(
     structured_llm = llm.with_structured_output(HuntResult)
     chain = HUNT_PROMPT | structured_llm
 
+    callback_handler = MetricsCallbackHandler(model=CLAUDE_MODEL)
     tracker = MetricsTracker()
     timer = tracker.start_timer()
 
     try:
-        # Invoke the chain — returns a validated HuntResult Pydantic model
-        result: HuntResult = chain.invoke({
-            "focus_name": focus_config["name"],
-            "focus_description": focus_config["description"],
-            "summary_text": summary_text,
-            "event_count": len(events),
-            "events_text": events_text,
-        })
+        # Invoke the chain with the callback handler to capture token usage
+        result: HuntResult = chain.invoke(
+            {
+                "focus_name": focus_config["name"],
+                "focus_description": focus_config["description"],
+                "summary_text": summary_text,
+                "event_count": len(events),
+                "events_text": events_text,
+            },
+            config={"callbacks": [callback_handler]},
+        )
 
         # Convert Pydantic model to dict for storage and display
         findings = result.model_dump()
 
-        # Cost estimation (LangChain doesn't expose token counts directly
-        # in the same way — this is a placeholder for callback-based tracking)
-        cost = 0.0
-        latency = int((time.monotonic() - timer) * 1000)
+        # Get real cost and latency from the callback handler
+        cost = callback_handler.last_cost_usd
+        latency = callback_handler.last_latency_ms
 
         logger.info(
-            "Hunt complete: threat_detected=%s severity=%s findings=%d cost=$%.4f",
+            "Hunt complete: threat_detected=%s severity=%s findings=%d "
+            "tokens=%d+%d cost=$%.4f",
             findings.get("threat_detected"),
             findings.get("severity"),
             len(findings.get("findings", [])),
+            callback_handler.last_input_tokens,
+            callback_handler.last_output_tokens,
             cost,
         )
 
@@ -373,7 +380,9 @@ def run_hunt(
         print(f"THREAT HUNT RESULTS: {focus_config['name']}")
         print(f"{'='*60}")
         print(hunt_to_flat_text(findings))
-        print(f"\nCost: ${cost:.4f} | Latency: {latency}ms")
+        print(f"\nTokens: {callback_handler.last_input_tokens}+"
+              f"{callback_handler.last_output_tokens} | "
+              f"Cost: ${cost:.4f} | Latency: {latency}ms")
         print(f"{'='*60}")
 
         # Write to OpenSearch
@@ -429,16 +438,4 @@ def main():
             try:
                 for focus in HUNT_FOCUSES:
                     run_hunt(focus=focus, hours_back=args.hours, max_events=args.max_events)
-            except KeyboardInterrupt:
-                logger.info("Hunt loop stopped")
-                break
-            except Exception as e:
-                logger.error("Hunt error: %s", e, exc_info=True)
-            logger.info("Sleeping %ds before next hunt cycle", HUNT_INTERVAL)
-            time.sleep(HUNT_INTERVAL)
-    else:
-        run_hunt(focus=args.focus, hours_back=args.hours, max_events=args.max_events)
-
-
-if __name__ == "__main__":
-    main()
+            except KeyboardInt

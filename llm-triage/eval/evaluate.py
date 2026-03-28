@@ -36,6 +36,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from schemas import TriageResult, triage_to_flat_text
 from metrics import MetricsTracker
+from callbacks import MetricsCallbackHandler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,6 +79,7 @@ def triage_alert_structured(
     chain,
     alert: dict,
     system_prompt: str,
+    callback_handler: MetricsCallbackHandler = None,
 ) -> Optional[dict]:
     """
     Send an alert through the LangChain chain for structured output.
@@ -87,10 +89,17 @@ def triage_alert_structured(
     """
     alert_text = json.dumps(alert, indent=2, default=str)
 
-    result: TriageResult = chain.invoke({
+    invoke_kwargs = {
         "system_prompt": system_prompt,
         "alert_text": alert_text,
-    })
+    }
+
+    config = {}
+    if callback_handler:
+        callback_handler.reset_last()
+        config["callbacks"] = [callback_handler]
+
+    result: TriageResult = chain.invoke(invoke_kwargs, config=config)
 
     # Convert Pydantic model to dict
     return result.model_dump()
@@ -200,12 +209,13 @@ def run_evaluation(
     system_prompt = load_system_prompt()
     dataset = load_dataset(dataset_path)
     tracker = MetricsTracker()
+    callback_handler = MetricsCallbackHandler(model=model)
 
     logger.info("=" * 60)
     logger.info("EVALUATION RUN")
     logger.info("  Model: %s", model)
     logger.info("  Dataset: %d alerts", len(dataset))
-    logger.info("  Framework: LangChain + with_structured_output")
+    logger.info("  Framework: LangChain + with_structured_output + callbacks")
     logger.info("=" * 60)
 
     results = []
@@ -222,12 +232,14 @@ def run_evaluation(
 
         timer = tracker.start_timer()
         try:
-            triage = triage_alert_structured(chain, alert, system_prompt)
+            triage = triage_alert_structured(
+                chain, alert, system_prompt, callback_handler
+            )
 
-            # Record basic metrics (LangChain doesn't expose raw API
-            # response in the same way — token tracking via callbacks is TODO)
-            import time
-            latency_ms = int((time.monotonic() - timer) * 1000)
+            # Get real metrics from the callback handler
+            latency_ms = callback_handler.last_latency_ms
+            cost_usd = callback_handler.last_cost_usd
+            tokens = callback_handler.last_input_tokens + callback_handler.last_output_tokens
 
         except Exception as e:
             logger.error("Failed on %s: %s", entry["id"], e)
@@ -271,9 +283,9 @@ def run_evaluation(
                 "benign_detection": benign_score,
             },
             "model_confidence": triage.get("confidence", 0),
-            "cost_usd": 0.0,  # TODO: implement via LangChain callbacks
+            "cost_usd": cost_usd,
             "latency_ms": latency_ms,
-            "tokens": 0,  # TODO: implement via LangChain callbacks
+            "tokens": tokens,
         }
 
         if verbose:
@@ -412,11 +424,9 @@ def main():
     )
 
     if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(results, f, indent=2)
-        logger.info("Results saved to %s", output_path)
+        with open(args.output, "w") as f:
+            json.dump(results, f, indent=2, default=str)
+        logger.info("Results saved to %s", args.output)
 
 
 if __name__ == "__main__":

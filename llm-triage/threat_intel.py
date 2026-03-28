@@ -366,17 +366,4 @@ def main():
         stats = store.get_stats()
         print(json.dumps(stats, indent=2))
     elif args.check:
-        fake_alert = {"data": {"srcip": args.check}, "full_log": args.check}
-        matches = store.check_alert(fake_alert)
-        if matches:
-            print(f"Found {len(matches)} matches:")
-            for m in matches:
-                print(f"  [{m['severity']}] {m['type']}: {m['value']}")
-        else:
-            print("No matches found")
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
+        fake_alert = {"data": {"srcip": args.check}, "full_lo

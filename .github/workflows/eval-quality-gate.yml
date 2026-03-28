@@ -1,0 +1,184 @@
+# =============================================================================
+# CI/CD Pipeline — LLM Triage Eval Quality Gate
+# =============================================================================
+# Runs on every PR to master. Builds the llm-triage container, executes the
+# evaluation suite against the labeled dataset, and gates merge on minimum
+# quality thresholds.
+#
+# Quality thresholds:
+#   - Severity accuracy (exact):    >= 60%
+#   - Severity accuracy (within-1): >= 80%
+#   - False positive accuracy:      >= 50%
+#   - MITRE ATT&CK F1:             >= 40%
+#   - Benign detection accuracy:    >= 60%
+#   - Zero eval errors
+#
+# The eval fires real Claude API calls, so it needs ANTHROPIC_API_KEY as a
+# repository secret. Cost is ~$0.05-0.15 per run (5 alerts × ~$0.01-0.03 each).
+# =============================================================================
+
+name: Eval Quality Gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'llm-triage/**'
+      - '.github/workflows/eval-quality-gate.yml'
+
+  # Allow manual trigger from Actions tab
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same PR (saves API costs)
+concurrency:
+  group: eval-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check Python syntax
+        run: python -m py_compile llm-triage/triage_service.py
+             && python -m py_compile llm-triage/schemas.py
+             && python -m py_compile llm-triage/callbacks.py
+             && python -m py_compile llm-triage/hunt.py
+             && python -m py_compile llm-triage/eval/evaluate.py
+
+  eval:
+    name: Eval Quality Gate
+    runs-on: ubuntu-latest
+    needs: lint
+    # Only run if the API key secret exists (forks won't have it)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: llm-triage/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r llm-triage/requirements.txt
+
+      - name: Run evaluation suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        working-directory: llm-triage
+        run: |
+          python -m eval.evaluate \
+            --model claude-sonnet-4-6 \
+            --verbose \
+            --output eval_results.json
+
+      - name: Check quality thresholds
+        working-directory: llm-triage
+        run: |
+          python - <<'PYEOF'
+          import json, sys
+
+          with open("eval_results.json") as f:
+              data = json.load(f)
+
+          agg = data.get("aggregate", {})
+          if not agg:
+              print("ERROR: No aggregate results found")
+              sys.exit(1)
+
+          # Define quality gates
+          gates = [
+              ("Severity (exact)",    agg.get("severity", {}).get("exact_accuracy", 0),      0.60),
+              ("Severity (within-1)", agg.get("severity", {}).get("within_one_accuracy", 0),  0.80),
+              ("False Positive",      agg.get("false_positive", {}).get("exact_accuracy", 0), 0.50),
+              ("MITRE F1",            agg.get("mitre", {}).get("avg_f1", 0),                  0.40),
+              ("Benign Detection",    agg.get("benign_detection", {}).get("accuracy", 0),     0.60),
+          ]
+
+          errors = agg.get("errors", 0)
+          total_cost = agg.get("total_cost_usd", 0)
+
+          print("=" * 60)
+          print("QUALITY GATE RESULTS")
+          print("=" * 60)
+          print(f"{'Metric':<25} {'Score':>8} {'Threshold':>10} {'Status':>8}")
+          print("-" * 60)
+
+          failed = False
+          for name, score, threshold in gates:
+              passed = score >= threshold
+              status = "PASS" if passed else "FAIL"
+              print(f"{name:<25} {score:>7.1%} {threshold:>9.0%} {'  ✓' if passed else '  ✗ FAIL'}")
+              if not passed:
+                  failed = True
+
+          # Check for eval errors
+          error_passed = errors == 0
+          print(f"{'Eval Errors':<25} {errors:>8d} {'0':>10} {'  ✓' if error_passed else '  ✗ FAIL'}")
+          if not error_passed:
+              failed = True
+
+          print("-" * 60)
+          print(f"Total eval cost: ${total_cost:.4f}")
+          print("=" * 60)
+
+          if failed:
+              print("\n❌ Quality gate FAILED — PR should not be merged.")
+              sys.exit(1)
+          else:
+              print("\n✅ All quality gates passed!")
+          PYEOF
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: llm-triage/eval_results.json
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 🔬 Eval Quality Gate Results\n\n';
+
+            try {
+              const data = JSON.parse(fs.readFileSync('llm-triage/eval_results.json', 'utf8'));
+              const agg = data.aggregate || {};
+              const sev = agg.severity || {};
+              const fp = agg.false_positive || {};
+              const mitre = agg.mitre || {};
+              const benign = agg.benign_detection || {};
+
+              const passed = '${{ job.status }}' === 'success';
+
+              body += `| Metric | Score | Threshold | Status |\n`;
+              body += `|--------|------:|----------:|--------|\n`;
+              body += `| Severity (exact) | ${(sev.exact_accuracy * 100).toFixed(1)}% | 60% | ${sev.exact_accuracy >= 0.60 ? '✅' : '❌'} |\n`;
+              body += `| Severity (within-1) | ${(sev.within_one_accuracy * 100).toFixed(1)}% | 80% | ${sev.within_one_accuracy >= 0.80 ? '✅' : '❌'} |\n`;
+              body += `| False Positive | ${(fp.exact_accuracy * 100).toFixed(1)}% | 50% | ${fp.exact_accuracy >= 0.50 ? '✅' : '❌'} |\n`;
+              body += `| MITRE F1 | ${(mitre.avg_f1 * 100).toFixed(1)}% | 40% | ${mitre.avg_f1 >= 0.40 ? '✅' : '❌'} |\n`;
+              body += `| Benign Detection | ${(benign.accuracy * 100).toFixed(1)}% | 60% | ${benign.accuracy >= 0.60 ? '✅' : '❌'} |\n`;
+              body += `\n**Cost:** $${agg.total_cost_usd?.toFixed(4) || '?'} | **Avg Latency:** ${agg.avg_latency_ms?.toFixed(0) || '?'}ms\n`;
+              body += `\n${passed ? '✅ **All quality gates passed!**' : '❌ **Quality gate failed — do not merge.**'}\n`;
+            } catch (e) {
+              body += `⚠️ Could not parse eval results: ${e.message}\n`;
+            }
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

@@ -15,7 +15,9 @@ An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh
 - **RAG Context** — Historical alert memory via LangChain's Chroma VectorStore gives Claude environment-specific context
 - **Pluggable Vector Store** — ChromaDB by default (all data stays on-premise), with optional Pinecone support for cloud scale. One environment variable to switch
 - **Human Feedback Loop** — Analysts mark results as agree/disagree, corrections export as new ground truth
-- **Cost & Latency Metrics** — Per-call token tracking, USD cost estimation, and quality signal monitoring
+- **Cost & Latency Metrics** — Per-call token tracking via LangChain callbacks, USD cost estimation, and quality signal monitoring
+- **CI/CD Quality Gates** — GitHub Actions pipeline runs the eval suite on every PR, gates merge on severity accuracy, MITRE F1, and benign detection thresholds
+- **Streamlit Dashboard** — Real-time monitoring UI showing severity distribution, alert timeline, MITRE heatmap, cost tracking, and alert inspector
 - **Experiment Tracking** — Systematic prompt engineering with reproducible comparison tables
 
 ## Architecture
@@ -91,6 +93,8 @@ This project goes beyond a basic API integration to demonstrate core ML engineer
 | Endpoint Telemetry | Sysmon | Process creation, network, file, registry, DNS events |
 | Data Store | OpenSearch (via Wazuh Indexer) | Alert storage, triage results, hunt findings, feedback |
 | Web UI | Wazuh Dashboard | Visualization of alerts, triage, and hunt results |
+| Dashboard | Streamlit + Plotly | LLM triage monitoring: severity charts, cost tracking, alert inspector |
+| CI/CD | GitHub Actions | Eval quality gates on every PR, automated scoring thresholds |
 | LLM Framework | LangChain | ChatAnthropic chains, structured output, VectorStore abstraction |
 | AI Engine | Claude Sonnet/Opus 4.6 (Anthropic API) | Structured analysis via Pydantic models |
 | Triage Service | Python 3.12 | Reactive alert triage with metrics and RAG |
@@ -133,13 +137,19 @@ wazuh-llm-security/
 │   ├── metrics.py                   # Cost, latency, and quality tracking
 │   ├── feedback.py                  # Analyst feedback loop + export
 │   ├── rag.py                       # RAG context via LangChain VectorStore
+│   ├── callbacks.py                  # LangChain callback handler for token/cost tracking
 │   ├── vectorstore.py               # Pluggable backend: ChromaDB or Pinecone
+│   ├── dashboard.py                  # Streamlit monitoring dashboard
 │   ├── prompts/
 │   │   ├── triage_system.txt        # Reactive triage prompt (SOC analyst)
 │   │   └── hunt_system.txt          # Proactive hunt prompt (threat hunter)
 │   └── eval/
 │       ├── labeled_dataset.json     # 10 alerts with ground-truth labels
 │       └── evaluate.py              # Scoring: accuracy, F1, within-1 agreement
+│
+├── .github/
+│   └── workflows/
+│       └── eval-quality-gate.yml    # CI/CD: eval on every PR with quality thresholds
 │
 └── notebooks/
     └── experiment_tracking.py       # Prompt variant comparison + experiment log
@@ -398,6 +408,35 @@ To view LLM results in the dashboard, create index patterns for each data type:
 5. Go to **Discover** (from the hamburger menu), select your index pattern, and set the time range to "Last 24 hours"
 
 You can filter by severity, confidence, MITRE technique, or any other structured field. Each document represents one complete analysis from Claude with all fields available for search and visualization.
+
+## Streamlit Dashboard
+
+A real-time monitoring UI for the triage pipeline, accessible at `http://localhost:8501`.
+
+```bash
+# Start the dashboard alongside the full stack
+docker compose up -d llm-dashboard
+
+# Or run standalone (outside Docker)
+cd llm-triage
+streamlit run dashboard.py
+```
+
+The dashboard shows severity distribution, alert timeline, confidence histograms, cost/latency scatter plots, false positive breakdown, MITRE ATT&CK technique frequency, and a detailed alert inspector. It supports three data sources: live OpenSearch, uploaded JSON files, or built-in demo data for testing.
+
+## CI/CD — Eval Quality Gate
+
+Every pull request that touches `llm-triage/` triggers a GitHub Actions workflow that runs the full evaluation suite against the labeled dataset. The pipeline gates merge on minimum quality thresholds:
+
+| Metric | Threshold |
+|--------|-----------|
+| Severity accuracy (exact) | >= 60% |
+| Severity accuracy (within-1) | >= 80% |
+| False positive accuracy | >= 50% |
+| MITRE ATT&CK F1 | >= 40% |
+| Benign detection accuracy | >= 60% |
+
+Results are posted as a PR comment with a pass/fail table. To enable, add your `ANTHROPIC_API_KEY` as a repository secret in GitHub (Settings → Secrets → Actions).
 
 ## Sample Structured Output
 

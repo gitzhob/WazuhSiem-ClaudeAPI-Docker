@@ -132,6 +132,29 @@ services:
       - wazuh.manager:wazuh.manager
       - wazuh.indexer:wazuh.indexer
 
+  # ---------------------------------------------------------------------------
+  # STREAMLIT DASHBOARD
+  # ---------------------------------------------------------------------------
+  # Real-time monitoring UI for triage results, threat hunts, and eval metrics.
+  # Access at http://localhost:8501
+  # ---------------------------------------------------------------------------
+  llm-dashboard:
+    build: ./llm-triage
+    container_name: llm-dashboard
+    hostname: llm-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=SecretPassword
+    command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+    depends_on:
+      - wazuh.indexer
+    links:
+      - wazuh.indexer:wazuh.indexer
+
 volumes:
   wazuh_api_configuration:
   wazuh_etc:

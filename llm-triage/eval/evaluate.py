@@ -417,4 +417,17 @@ def main():
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    results = run_evaluat
+    results = run_evaluation(
+        model=args.model,
+        dataset_path=args.dataset,
+        verbose=args.verbose,
+    )
+
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(results, f, indent=2, default=str)
+        logger.info("Results saved to %s", args.output)
+
+
+if __name__ == "__main__":
+    main()

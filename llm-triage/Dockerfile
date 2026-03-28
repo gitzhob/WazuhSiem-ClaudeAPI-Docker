@@ -25,6 +25,7 @@ COPY rag.py .
 COPY hunt.py .
 COPY threat_intel.py .
 COPY vectorstore.py .
+COPY dashboard.py .
 COPY prompts/ prompts/
 COPY eval/ eval/
 

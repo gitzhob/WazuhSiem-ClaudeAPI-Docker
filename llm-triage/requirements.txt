@@ -24,4 +24,9 @@ sentence-transformers>=2.2.0
 # langchain-pinecone>=0.2.0
 # pinecone-client>=3.0.0
 
-# Evaluation — data analysis and vi
+# Evaluation — data analysis and visualization
+pandas>=2.0.0
+
+# Dashboard — Streamlit UI for monitoring triage results
+streamlit>=1.30.0
+plotly>=5.18.0

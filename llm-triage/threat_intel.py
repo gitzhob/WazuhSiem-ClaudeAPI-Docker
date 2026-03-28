@@ -8,9 +8,10 @@ Claude's context during triage and hunting. Sources include:
   2. Analyst feedback — IPs/domains flagged as malicious during review
   3. (Future) External feeds — abuse.ch, AlienVault OTX, etc.
 
-IOCs are stored in ChromaDB alongside alert history, so when a new
-alert contains a known-bad IP or domain, Claude automatically gets
-context like "this IP was flagged as a C2 server in our threat feed."
+IOCs are stored in ChromaDB via LangChain's Chroma VectorStore, so
+when a new alert contains a known-bad IP or domain, Claude
+automatically gets context like "this IP was flagged as a C2 server
+in our threat feed."
 
 Usage:
     python threat_intel.py --load iocs.json    # Load IOCs into ChromaDB
@@ -28,11 +29,30 @@ from typing import Optional
 
 logger = logging.getLogger("llm-triage.threat_intel")
 
+# LangChain + ChromaDB — gracefully degrade if not installed
 try:
-    import chromadb
-    CHROMA_AVAILABLE = True
+    from langchain_community.vectorstores import Chroma
+    from langchain_core.documents import Document
+
+    LANGCHAIN_CHROMA_AVAILABLE = True
 except ImportError:
-    CHROMA_AVAILABLE = False
+    LANGCHAIN_CHROMA_AVAILABLE = False
+    logger.warning(
+        "LangChain Chroma not installed — threat intel features disabled. "
+        "Install with: pip install langchain-community chromadb"
+    )
+
+# Use the same embedding approach as rag.py for consistency
+EMBEDDINGS = None
+try:
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+
+    EMBEDDINGS = HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+    )
+except ImportError:
+    pass  # Will use ChromaDB's default embeddings
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +156,8 @@ DEFAULT_IOCS = [
 
 class ThreatIntelStore:
     """
-    Manages threat intelligence IOCs in ChromaDB for RAG context.
+    Manages threat intelligence IOCs in ChromaDB via LangChain's
+    Chroma VectorStore wrapper.
 
     When the triage or hunt service encounters an IP, domain, hash,
     or command pattern that matches a known IOC, the threat context
@@ -146,20 +167,29 @@ class ThreatIntelStore:
     COLLECTION_NAME = "threat_intel"
 
     def __init__(self, persist_dir: str = "/data/chromadb"):
-        if not CHROMA_AVAILABLE:
-            self.client = None
-            self.collection = None
+        if not LANGCHAIN_CHROMA_AVAILABLE:
+            self.vectorstore = None
             return
 
-        self.client = chromadb.PersistentClient(path=persist_dir)
-        self.collection = self.client.get_or_create_collection(
-            name=self.COLLECTION_NAME,
-            metadata={"description": "Threat intelligence IOCs"},
+        self.vectorstore = Chroma(
+            collection_name=self.COLLECTION_NAME,
+            persist_directory=persist_dir,
+            embedding_function=EMBEDDINGS,  # None → ChromaDB default
+            collection_metadata={"description": "Threat intelligence IOCs"},
         )
 
     @property
     def is_available(self) -> bool:
-        return self.collection is not None
+        return self.vectorstore is not None
+
+    def _count(self) -> int:
+        """Get the number of documents in the collection."""
+        if not self.is_available:
+            return 0
+        try:
+            return self.vectorstore._collection.count()
+        except Exception:
+            return 0
 
     def load_iocs(self, iocs: list) -> int:
         """Load a list of IOC dicts into ChromaDB. Returns count loaded."""
@@ -189,10 +219,10 @@ class ThreatIntelStore:
             ioc_id = f"ioc-{ioc['type']}-{hash(ioc['value']) & 0xFFFFFFFF:08x}"
 
             try:
-                self.collection.upsert(
-                    ids=[ioc_id],
-                    documents=[doc_text],
+                self.vectorstore.add_texts(
+                    texts=[doc_text],
                     metadatas=[metadata],
+                    ids=[ioc_id],
                 )
                 count += 1
             except Exception as e:
@@ -216,11 +246,11 @@ class ThreatIntelStore:
         Check if any values in an alert match known IOCs.
 
         Searches the alert's IPs, domains, hashes, and file paths
-        against the IOC database.
+        against the IOC database using LangChain's similarity search.
 
         Returns a list of matching IOC metadata dicts.
         """
-        if not self.is_available or self.collection.count() == 0:
+        if not self.is_available or self._count() == 0:
             return []
 
         # Extract searchable values from the alert
@@ -252,17 +282,17 @@ class ThreatIntelStore:
         if not search_values:
             return []
 
-        # Query ChromaDB with each value
+        # Query Chroma with each value via LangChain
         matches = []
         for value in search_values:
             try:
-                results = self.collection.query(
-                    query_texts=[value],
-                    n_results=3,
+                results = self.vectorstore.similarity_search_with_score(
+                    query=value,
+                    k=3,
                 )
-                for i, meta in enumerate(results.get("metadatas", [[]])[0]):
-                    distance = results.get("distances", [[]])[0][i]
+                for doc, distance in results:
                     if distance < 0.5:  # Only close matches
+                        meta = doc.metadata.copy()
                         meta["match_distance"] = distance
                         meta["matched_against"] = value[:100]
                         matches.append(meta)
@@ -302,7 +332,7 @@ class ThreatIntelStore:
         if not self.is_available:
             return {"available": False}
 
-        count = self.collection.count()
+        count = self._count()
         return {
             "available": True,
             "total_iocs": count,
@@ -323,7 +353,7 @@ def main():
     store = ThreatIntelStore(persist_dir=persist_dir)
 
     if not store.is_available:
-        print("ChromaDB not available. Install with: pip install chromadb")
+        print("ChromaDB not available. Install with: pip install langchain-community chromadb")
         sys.exit(1)
 
     if args.load:

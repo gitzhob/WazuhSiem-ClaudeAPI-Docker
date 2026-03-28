@@ -11,6 +11,10 @@ This is the difference between reactive alerting and proactive hunting:
   - Proactive: "Here are 200 events from the last hour. Do you see
     any lateral movement, persistence, data staging, or C2 patterns?"
 
+Now powered by LangChain — uses ChatAnthropic + with_structured_output()
+to get structured HuntResult objects directly, instead of manually
+parsing tool_use blocks from the raw Anthropic SDK.
+
 Usage:
     python hunt.py                     # Run one hunt cycle
     python hunt.py --continuous        # Hunt every HUNT_INTERVAL
@@ -28,11 +32,12 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
+from langchain_anthropic import ChatAnthropic
+from langchain_core.prompts import ChatPromptTemplate
 import requests
 from requests.auth import HTTPBasicAuth
 
-from schemas import TRIAGE_TOOL
+from schemas import HuntResult, hunt_to_flat_text
 from metrics import MetricsTracker
 
 # ---------------------------------------------------------------------------
@@ -60,6 +65,24 @@ PROMPT_DIR = Path(__file__).parent / "prompts"
 # ---------------------------------------------------------------------------
 
 HUNT_SYSTEM_PROMPT = (PROMPT_DIR / "hunt_system.txt").read_text()
+
+# ---------------------------------------------------------------------------
+# LangChain prompt template for hunts
+# ---------------------------------------------------------------------------
+
+HUNT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", HUNT_SYSTEM_PROMPT),
+    ("human", (
+        "HUNT FOCUS: {focus_name}\n"
+        "{focus_description}\n\n"
+        "EVENT BATCH SUMMARY:\n{summary_text}\n\n"
+        "RAW EVENTS ({event_count} total, showing up to 100):\n"
+        "```json\n{events_text}\n```\n\n"
+        "Analyze these events as a batch. Look for attack patterns, "
+        "anomalies, and suspicious sequences that individual alerts "
+        "would miss."
+    )),
+])
 
 # ---------------------------------------------------------------------------
 # Threat hunt focus areas
@@ -95,104 +118,6 @@ HUNT_FOCUSES = {
         "description": "Broad sweep — look for anything anomalous or suspicious",
         "query_boost": [],
         "mitre_tactics": [],
-    },
-}
-
-# ---------------------------------------------------------------------------
-# Hunt tool schema — structured output for hunt findings
-# ---------------------------------------------------------------------------
-
-HUNT_TOOL = {
-    "name": "submit_hunt_findings",
-    "description": (
-        "Submit your threat hunt findings. Report any suspicious patterns, "
-        "attack chains, or anomalies you identified in the event batch."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "threat_detected": {
-                "type": "boolean",
-                "description": "True if you found evidence of suspicious/malicious activity.",
-            },
-            "severity": {
-                "type": "string",
-                "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL"],
-                "description": "Overall severity of findings.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "2-3 sentence summary of what you found (or didn't find).",
-            },
-            "findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Short title for this finding.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Detailed explanation of the suspicious pattern.",
-                        },
-                        "evidence": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Specific log entries or event details supporting this finding.",
-                        },
-                        "mitre_technique": {
-                            "type": "string",
-                            "description": "MITRE ATT&CK technique ID (e.g., T1059.001).",
-                        },
-                        "recommended_action": {
-                            "type": "string",
-                            "description": "What to do about this finding.",
-                        },
-                    },
-                    "required": ["title", "description", "recommended_action"],
-                },
-                "description": "Individual findings. Empty array if nothing suspicious.",
-            },
-            "patterns_checked": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "What attack patterns you looked for (even if not found).",
-            },
-            "recommended_rules": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "description": {
-                            "type": "string",
-                            "description": "What this rule would detect.",
-                        },
-                        "wazuh_rule_xml": {
-                            "type": "string",
-                            "description": "Suggested Wazuh XML rule definition.",
-                        },
-                    },
-                    "required": ["description"],
-                },
-                "description": "Suggested new Wazuh detection rules based on findings.",
-            },
-            "confidence": {
-                "type": "number",
-                "minimum": 0.0,
-                "maximum": 1.0,
-                "description": "Confidence in the overall assessment.",
-            },
-        },
-        "required": [
-            "threat_detected",
-            "severity",
-            "summary",
-            "findings",
-            "patterns_checked",
-            "confidence",
-        ],
     },
 }
 
@@ -368,7 +293,9 @@ def run_hunt(
     """
     Execute a single threat hunt cycle.
 
-    Returns the structured hunt findings from Claude.
+    Uses LangChain's ChatAnthropic + with_structured_output(HuntResult)
+    to get a validated Pydantic model back from Claude, instead of
+    manually parsing tool_use blocks.
     """
     focus_config = HUNT_FOCUSES.get(focus, HUNT_FOCUSES["general"])
 
@@ -403,95 +330,60 @@ def run_hunt(
 
     summary_text = json.dumps(summary, indent=2)
 
-    user_prompt = (
-        f"HUNT FOCUS: {focus_config['name']}\n"
-        f"{focus_config['description']}\n\n"
-        f"EVENT BATCH SUMMARY:\n{summary_text}\n\n"
-        f"RAW EVENTS ({len(events)} total, showing up to 100):\n"
-        f"```json\n{events_text}\n```\n\n"
-        "Analyze these events as a batch. Look for attack patterns, "
-        "anomalies, and suspicious sequences that individual alerts "
-        "would miss. Submit your findings using the submit_hunt_findings tool."
+    # Build the LangChain chain
+    llm = ChatAnthropic(
+        model=CLAUDE_MODEL,
+        api_key=ANTHROPIC_API_KEY,
+        max_tokens=3000,
     )
+    structured_llm = llm.with_structured_output(HuntResult)
+    chain = HUNT_PROMPT | structured_llm
 
-    # Send to Claude
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     tracker = MetricsTracker()
     timer = tracker.start_timer()
 
     try:
-        message = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=3000,
-            system=HUNT_SYSTEM_PROMPT,
-            tools=[HUNT_TOOL],
-            tool_choice={"type": "tool", "name": "submit_hunt_findings"},
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+        # Invoke the chain — returns a validated HuntResult Pydantic model
+        result: HuntResult = chain.invoke({
+            "focus_name": focus_config["name"],
+            "focus_description": focus_config["description"],
+            "summary_text": summary_text,
+            "event_count": len(events),
+            "events_text": events_text,
+        })
 
-        # Extract findings
-        findings = None
-        for block in message.content:
-            if block.type == "tool_use" and block.name == "submit_hunt_findings":
-                findings = block.input
-                break
+        # Convert Pydantic model to dict for storage and display
+        findings = result.model_dump()
 
-        usage = getattr(message, "usage", None)
+        # Cost estimation (LangChain doesn't expose token counts directly
+        # in the same way — this is a placeholder for callback-based tracking)
         cost = 0.0
-        if usage:
-            cost = MetricsTracker._calculate_cost(
-                CLAUDE_MODEL, usage.input_tokens, usage.output_tokens
-            )
-
         latency = int((time.monotonic() - timer) * 1000)
 
-        if findings:
-            logger.info(
-                "Hunt complete: threat_detected=%s severity=%s findings=%d cost=$%.4f",
-                findings.get("threat_detected"),
-                findings.get("severity"),
-                len(findings.get("findings", [])),
-                cost,
-            )
+        logger.info(
+            "Hunt complete: threat_detected=%s severity=%s findings=%d cost=$%.4f",
+            findings.get("threat_detected"),
+            findings.get("severity"),
+            len(findings.get("findings", [])),
+            cost,
+        )
 
-            # Print findings
-            print(f"\n{'='*60}")
-            print(f"THREAT HUNT RESULTS: {focus_config['name']}")
-            print(f"{'='*60}")
-            print(f"Threat detected: {findings.get('threat_detected')}")
-            print(f"Severity: {findings.get('severity')}")
-            print(f"Confidence: {findings.get('confidence')}")
-            print(f"\nSummary: {findings.get('summary')}")
+        # Print findings using the shared formatter from schemas.py
+        print(f"\n{'='*60}")
+        print(f"THREAT HUNT RESULTS: {focus_config['name']}")
+        print(f"{'='*60}")
+        print(hunt_to_flat_text(findings))
+        print(f"\nCost: ${cost:.4f} | Latency: {latency}ms")
+        print(f"{'='*60}")
 
-            for i, f in enumerate(findings.get("findings", []), 1):
-                print(f"\n--- Finding {i}: {f['title']} ---")
-                print(f"  {f['description']}")
-                if f.get("mitre_technique"):
-                    print(f"  MITRE: {f['mitre_technique']}")
-                print(f"  Action: {f['recommended_action']}")
-                if f.get("evidence"):
-                    for ev in f["evidence"][:3]:
-                        print(f"  Evidence: {ev[:120]}")
+        # Write to OpenSearch
+        writer = HuntWriter(INDEXER_URL, INDEXER_USERNAME, INDEXER_PASSWORD)
+        writer.write_findings(findings, summary, focus, CLAUDE_MODEL, cost, latency)
 
-            if findings.get("recommended_rules"):
-                print(f"\n--- Suggested Detection Rules ---")
-                for rule in findings["recommended_rules"]:
-                    print(f"  - {rule['description']}")
-                    if rule.get("wazuh_rule_xml"):
-                        print(f"    {rule['wazuh_rule_xml'][:200]}")
+        return findings
 
-            print(f"\nPatterns checked: {', '.join(findings.get('patterns_checked', []))}")
-            print(f"Cost: ${cost:.4f} | Latency: {latency}ms")
-            print(f"{'='*60}")
-
-            # Write to OpenSearch
-            writer = HuntWriter(INDEXER_URL, INDEXER_USERNAME, INDEXER_PASSWORD)
-            writer.write_findings(findings, summary, focus, CLAUDE_MODEL, cost, latency)
-
-            return findings
-
-    except anthropic.APIError as e:
-        logger.error("Claude API error during hunt: %s", e)
+    except Exception as e:
+        logger.error("Error during hunt: %s", e)
         return {"threat_detected": False, "summary": f"Hunt failed: {e}"}
 
 

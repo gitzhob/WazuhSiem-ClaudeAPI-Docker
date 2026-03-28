@@ -5,6 +5,9 @@ Runs Claude triage against a labeled dataset of alerts with known
 ground-truth severity, false positive likelihood, and MITRE mappings.
 Computes accuracy, agreement rates, and per-class metrics.
 
+Now powered by LangChain — uses ChatAnthropic + with_structured_output()
+with the TriageResult Pydantic model instead of raw tool_use parsing.
+
 Usage:
     python -m eval.evaluate                    # Run full eval
     python -m eval.evaluate --model claude-sonnet-4-6  # Specific model
@@ -28,10 +31,11 @@ from typing import Optional
 # Add parent dir to path so we can import from llm-triage
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from schemas import TRIAGE_TOOL, triage_to_flat_text
-from metrics import MetricsTracker
+from langchain_anthropic import ChatAnthropic
+from langchain_core.prompts import ChatPromptTemplate
 
-import anthropic
+from schemas import TriageResult, triage_to_flat_text
+from metrics import MetricsTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,40 +63,37 @@ def load_system_prompt() -> str:
     return prompt_path.read_text()
 
 
+# LangChain prompt template for evaluation
+EVAL_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "{system_prompt}"),
+    ("human", (
+        "Analyze the following Wazuh security alert and provide your "
+        "triage assessment.\n\n"
+        "```json\n{alert_text}\n```"
+    )),
+])
+
+
 def triage_alert_structured(
-    client: anthropic.Anthropic,
-    model: str,
-    system_prompt: str,
+    chain,
     alert: dict,
-) -> tuple[Optional[dict], object]:
+    system_prompt: str,
+) -> Optional[dict]:
     """
-    Send an alert to Claude using tool_use for structured output.
+    Send an alert through the LangChain chain for structured output.
 
     Returns:
-        (triage_result_dict, raw_api_response)
+        triage_result_dict or None if the chain fails
     """
     alert_text = json.dumps(alert, indent=2, default=str)
-    user_prompt = (
-        "Analyze the following Wazuh security alert and submit your "
-        "triage assessment using the submit_triage tool.\n\n"
-        f"```json\n{alert_text}\n```"
-    )
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=1500,
-        system=system_prompt,
-        tools=[TRIAGE_TOOL],
-        tool_choice={"type": "tool", "name": "submit_triage"},
-        messages=[{"role": "user", "content": user_prompt}],
-    )
+    result: TriageResult = chain.invoke({
+        "system_prompt": system_prompt,
+        "alert_text": alert_text,
+    })
 
-    # Extract the tool call arguments
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_triage":
-            return block.input, response
-
-    return None, response
+    # Convert Pydantic model to dict
+    return result.model_dump()
 
 
 def score_severity(predicted: str, actual: str) -> dict:
@@ -177,6 +178,9 @@ def run_evaluation(
     """
     Run the full evaluation pipeline.
 
+    Uses LangChain's ChatAnthropic + with_structured_output(TriageResult)
+    to get validated Pydantic model responses from Claude.
+
     Returns a results dict with per-alert scores and aggregate metrics.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -184,7 +188,15 @@ def run_evaluation(
         logger.error("ANTHROPIC_API_KEY not set")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # Build the LangChain chain
+    llm = ChatAnthropic(
+        model=model,
+        api_key=api_key,
+        max_tokens=1500,
+    )
+    structured_llm = llm.with_structured_output(TriageResult)
+    chain = EVAL_PROMPT | structured_llm
+
     system_prompt = load_system_prompt()
     dataset = load_dataset(dataset_path)
     tracker = MetricsTracker()
@@ -193,6 +205,7 @@ def run_evaluation(
     logger.info("EVALUATION RUN")
     logger.info("  Model: %s", model)
     logger.info("  Dataset: %d alerts", len(dataset))
+    logger.info("  Framework: LangChain + with_structured_output")
     logger.info("=" * 60)
 
     results = []
@@ -209,17 +222,15 @@ def run_evaluation(
 
         timer = tracker.start_timer()
         try:
-            triage, api_response = triage_alert_structured(
-                client, model, system_prompt, alert
-            )
-            metrics = tracker.record_call(
-                timer, api_response, triage, alert, model
-            )
+            triage = triage_alert_structured(chain, alert, system_prompt)
+
+            # Record basic metrics (LangChain doesn't expose raw API
+            # response in the same way — token tracking via callbacks is TODO)
+            import time
+            latency_ms = int((time.monotonic() - timer) * 1000)
+
         except Exception as e:
             logger.error("Failed on %s: %s", entry["id"], e)
-            metrics = tracker.record_call(
-                timer, None, None, alert, model, error=str(e)
-            )
             results.append({
                 "id": entry["id"],
                 "description": entry["description"],
@@ -260,9 +271,9 @@ def run_evaluation(
                 "benign_detection": benign_score,
             },
             "model_confidence": triage.get("confidence", 0),
-            "cost_usd": metrics.estimated_cost_usd,
-            "latency_ms": metrics.latency_ms,
-            "tokens": metrics.input_tokens + metrics.output_tokens,
+            "cost_usd": 0.0,  # TODO: implement via LangChain callbacks
+            "latency_ms": latency_ms,
+            "tokens": 0,  # TODO: implement via LangChain callbacks
         }
 
         if verbose:
@@ -294,6 +305,7 @@ def run_evaluation(
     aggregate = {
         "model": model,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "framework": "langchain",
         "dataset_size": len(dataset),
         "successful_evals": n,
         "errors": len(dataset) - n,
@@ -348,6 +360,7 @@ def run_evaluation(
     print("EVALUATION RESULTS")
     print(f"{'='*60}")
     print(f"Model:              {model}")
+    print(f"Framework:          LangChain")
     print(f"Alerts evaluated:   {n}/{len(dataset)}")
     print(f"")
     print(f"Severity accuracy:  {aggregate['severity']['exact_accuracy']:.1%} exact, "

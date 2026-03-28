@@ -23,6 +23,7 @@ COPY feedback.py .
 COPY rag.py .
 COPY hunt.py .
 COPY threat_intel.py .
+COPY vectorstore.py .
 COPY prompts/ prompts/
 COPY eval/ eval/
 

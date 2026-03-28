@@ -1,11 +1,28 @@
 # Core dependencies
-anthropic>=0.40.0
 requests>=2.31.0
 urllib3>=2.0.0
 python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# LangChain framework — replaces direct Anthropic SDK usage
+langchain>=0.3.0
+langchain-anthropic>=0.3.0
+langchain-community>=0.3.0
+langchain-core>=0.3.0
+
+# Anthropic SDK — still needed as langchain-anthropic's dependency
+anthropic>=0.40.0
 
 # RAG — vector similarity search for historical alert context
 chromadb>=0.4.0
+
+# Embeddings — for RAG vector similarity (optional but recommended)
+sentence-transformers>=2.2.0
+
+# Pinecone — cloud vector store (optional, for production scale)
+# Uncomment these if using Pinecone instead of ChromaDB:
+# langchain-pinecone>=0.2.0
+# pinecone-client>=3.0.0
 
 # Evaluation — data analysis and visualization
 pandas>=2.0.0

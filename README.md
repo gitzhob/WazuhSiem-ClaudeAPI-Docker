@@ -13,7 +13,7 @@ An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh
 - **Structured Output** — Typed Pydantic models validated via LangChain's `with_structured_output()` (not free text), enabling programmatic evaluation with Python type safety
 - **Evaluation Framework** — Labeled dataset with ground-truth scoring for severity accuracy, MITRE F1, and benign detection
 - **RAG Context** — Historical alert memory via LangChain's Chroma VectorStore gives Claude environment-specific context
-- **Pluggable Vector Store** — Choose between ChromaDB (local, zero-config) or Pinecone (cloud, production-scale) via a single environment variable
+- **Pluggable Vector Store** — ChromaDB by default (all data stays on-premise), with optional Pinecone support for cloud scale. One environment variable to switch
 - **Human Feedback Loop** — Analysts mark results as agree/disagree, corrections export as new ground truth
 - **Cost & Latency Metrics** — Per-call token tracking, USD cost estimation, and quality signal monitoring
 - **Experiment Tracking** — Systematic prompt engineering with reproducible comparison tables
@@ -352,9 +352,11 @@ All configuration is in `.env`:
 | `ALERT_LEVEL_THRESHOLD` | `10` | Minimum Wazuh rule level to triage (1-15) |
 | `POLL_INTERVAL_SECONDS` | `30` | How often to check for new alerts |
 | `RAG_ENABLED` | `false` | Enable ChromaDB context injection |
-| `VECTOR_STORE` | `chroma` | Vector store backend: `chroma` (local) or `pinecone` (cloud) |
+| `VECTOR_STORE` | `chroma` | Vector store backend: `chroma` (local, recommended) or `pinecone` (cloud) |
 | `PINECONE_API_KEY` | — | Pinecone API key (required if `VECTOR_STORE=pinecone`) |
 | `PINECONE_INDEX_NAME` | `wazuh-alerts` | Pinecone index name |
+
+> **Security note:** ChromaDB is the recommended default because all alert data stays on your machine. Pinecone sends vector embeddings of alert metadata to external cloud servers. Only use Pinecone if your organization's security policy permits sending alert data to a third-party service. Note that the Anthropic API call itself also sends alert data externally — this is inherent to using a cloud LLM for triage.
 
 ### OpenSearch Indices
 
@@ -521,21 +523,4 @@ When Claude analyzes an alert, it assigns one of four severity levels:
 
 - **"Fetched 0 alerts"** — The tool is running but no new security events match the threshold. This is normal if your machine has been idle. Lower the `ALERT_LEVEL_THRESHOLD` in `.env` to `5` to see more results.
 - **Dashboard won't load** — Make sure Docker Desktop is running and all containers show "Running." Try `docker compose restart` in PowerShell.
-- **API errors** — Check that your Anthropic API key in `.env` is correct and your account has billing set up.
-
-## Stopping and Restarting
-
-```bash
-# Stop everything (preserves data)
-docker compose stop
-
-# Start everything back up
-docker compose up -d
-
-# Stop only the triage service (to save API costs when not needed)
-docker compose stop llm-triage
-```
-
-## License
-
-The Wazuh components are licensed under [GPLv2](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html). The LLM triage service code in `llm-triage/` is MIT licensed.
+- **API errors** 

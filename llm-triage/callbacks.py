@@ -1,5 +1,5 @@
 """
-LangChain Callback Handler for Token & Cost Tracking
+LangChain Callback Handler for Token & Cost Tracking (v1.1)
 
 LangChain uses a "callback" system to let you hook into what's happening
 inside a chain without modifying the chain itself. Think of it like

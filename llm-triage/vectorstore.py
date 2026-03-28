@@ -2,8 +2,16 @@
 Vector Store Factory — pluggable backend for RAG and Threat Intel.
 
 Supports two backends, selected via the VECTOR_STORE environment variable:
-  - "chroma"   (default) — local ChromaDB, no external service needed
+  - "chroma"   (DEFAULT, RECOMMENDED) — local ChromaDB, all data stays on-premise
   - "pinecone" — cloud-hosted Pinecone for production scale
+
+SECURITY NOTE: ChromaDB is the default for a reason. This is a security
+monitoring tool — alert data, IOCs, and triage results may contain
+sensitive information (internal IPs, hostnames, attack patterns, employee
+names). With ChromaDB, all vector data stays on your local machine or
+Docker volume. Pinecone sends this data to external cloud servers over
+HTTPS. Only use Pinecone if your organization's security policy permits
+sending alert metadata to a third-party cloud service.
 
 Both backends use LangChain's VectorStore interface, so the rest of
 the codebase doesn't need to know which one is active. Swapping is
@@ -144,9 +152,4 @@ def _create_pinecone(collection_name: str):
         namespace=collection_name,
         pinecone_api_key=api_key,
     )
-    logger.info(
-        "Created Pinecone VectorStore: index=%s, namespace=%s",
-        index_name,
-        collection_name,
-    )
-    return store
+   

@@ -9,34 +9,49 @@ context it wouldn't otherwise have:
   - "A similar hosts file modification on this endpoint was flagged
     as malicious last month — the attacker was redirecting DNS."
 
-Uses ChromaDB as a lightweight vector database that runs locally
-(no external service needed). Embeddings are generated from alert
-text using a simple TF-IDF approach or optionally via an embedding API.
+Uses LangChain's Chroma VectorStore wrapper around ChromaDB, which
+gives us a standard interface that could be swapped to Pinecone,
+FAISS, or any other LangChain-supported vector store later.
 
 Architecture:
-  Alert → embed → query ChromaDB → retrieve top-K similar → inject
-  into Claude prompt as "historical context" → improved triage
+  Alert → embed → query Chroma via LangChain → retrieve top-K similar
+  → inject into Claude prompt as "historical context" → improved triage
 """
 
 import json
 import hashlib
 import logging
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("llm-triage.rag")
 
-# ChromaDB is optional — gracefully degrade if not installed
+# LangChain + ChromaDB are optional — gracefully degrade if not installed
 try:
-    import chromadb
-    pass  # PersistentClient needs no extra imports
+    from langchain_community.vectorstores import Chroma
+    from langchain_core.documents import Document
 
-    CHROMA_AVAILABLE = True
+    LANGCHAIN_CHROMA_AVAILABLE = True
 except ImportError:
-    CHROMA_AVAILABLE = False
+    LANGCHAIN_CHROMA_AVAILABLE = False
     logger.warning(
-        "ChromaDB not installed — RAG features disabled. "
-        "Install with: pip install chromadb"
+        "LangChain Chroma not installed — RAG features disabled. "
+        "Install with: pip install langchain-community chromadb"
+    )
+
+# Embeddings — try HuggingFace first, fall back to Chroma's built-in
+EMBEDDINGS = None
+try:
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+
+    EMBEDDINGS = HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+    )
+    logger.info("Using HuggingFace embeddings (all-MiniLM-L6-v2)")
+except ImportError:
+    logger.info(
+        "sentence-transformers not installed — using ChromaDB default embeddings. "
+        "For better results: pip install sentence-transformers"
     )
 
 
@@ -44,31 +59,45 @@ class AlertMemory:
     """
     Vector store for past alerts and triage results.
 
-    Stores alert text + triage outcome in ChromaDB and retrieves
-    similar alerts to provide historical context for new triage requests.
+    Uses LangChain's Chroma VectorStore wrapper instead of raw ChromaDB.
+    This means we get a standard interface — if you want to swap to
+    Pinecone or FAISS later, you only change the constructor, not the
+    retrieval logic.
     """
 
     COLLECTION_NAME = "alert_history"
 
     def __init__(self, persist_dir: str = "/data/chromadb"):
-        if not CHROMA_AVAILABLE:
-            self.client = None
-            self.collection = None
+        if not LANGCHAIN_CHROMA_AVAILABLE:
+            self.vectorstore = None
             return
 
-        self.client = chromadb.PersistentClient(path=persist_dir)
-        self.collection = self.client.get_or_create_collection(
-            name=self.COLLECTION_NAME,
-            metadata={"description": "Wazuh alert history with triage outcomes"},
+        # LangChain's Chroma wrapper handles PersistentClient internally
+        # when you pass persist_directory
+        self.vectorstore = Chroma(
+            collection_name=self.COLLECTION_NAME,
+            persist_directory=persist_dir,
+            embedding_function=EMBEDDINGS,  # None → ChromaDB default
+            collection_metadata={"description": "Wazuh alert history with triage outcomes"},
         )
         logger.info(
-            "AlertMemory initialized: %d entries in collection",
-            self.collection.count(),
+            "AlertMemory initialized via LangChain Chroma: %d entries",
+            self._count(),
         )
 
     @property
     def is_available(self) -> bool:
-        return self.collection is not None
+        return self.vectorstore is not None
+
+    def _count(self) -> int:
+        """Get the number of documents in the collection."""
+        if not self.is_available:
+            return 0
+        try:
+            # Access the underlying ChromaDB collection for count
+            return self.vectorstore._collection.count()
+        except Exception:
+            return 0
 
     def store_alert(
         self,
@@ -79,15 +108,12 @@ class AlertMemory:
         """
         Store an alert and its triage outcome in the vector database.
 
-        Args:
-            alert: The raw Wazuh alert
-            triage_result: Claude's structured triage output
-            analyst_verdict: Optional analyst feedback ('agree'/'disagree')
+        Wraps the data as a LangChain Document with metadata, then
+        upserts into the Chroma collection.
         """
         if not self.is_available:
             return False
 
-        # Create a text representation for embedding
         text = self._alert_to_text(alert, triage_result)
         alert_id = self._generate_id(alert)
 
@@ -103,15 +129,16 @@ class AlertMemory:
         }
 
         try:
-            self.collection.upsert(
-                ids=[alert_id],
-                documents=[text],
+            # LangChain's Chroma.add_texts handles upsert via ids
+            self.vectorstore.add_texts(
+                texts=[text],
                 metadatas=[metadata],
+                ids=[alert_id],
             )
             logger.debug("Stored alert %s in vector DB", alert_id)
             return True
         except Exception as e:
-            logger.error("Failed to store alert in ChromaDB: %s", e)
+            logger.error("Failed to store alert in Chroma: %s", e)
             return False
 
     def retrieve_similar(
@@ -123,33 +150,32 @@ class AlertMemory:
         """
         Find similar past alerts for context.
 
-        Returns a list of dicts with 'text', 'metadata', and 'distance'.
-        Lower distance = more similar.
+        Uses LangChain's similarity_search_with_score which returns
+        (Document, score) tuples. The score is L2 distance —
+        lower = more similar.
         """
-        if not self.is_available:
+        if not self.is_available or self._count() == 0:
             return []
 
         query_text = self._alert_to_query(alert)
 
         try:
-            results = self.collection.query(
-                query_texts=[query_text],
-                n_results=min(n_results, self.collection.count() or 1),
+            # LangChain returns list of (Document, distance) tuples
+            results = self.vectorstore.similarity_search_with_score(
+                query=query_text,
+                k=min(n_results, self._count()),
             )
 
             similar = []
-            for i, doc in enumerate(results.get("documents", [[]])[0]):
-                distance = results.get("distances", [[]])[0][i]
-                metadata = results.get("metadatas", [[]])[0][i]
-
+            for doc, distance in results:
                 # ChromaDB uses L2 distance — lower is more similar
                 # Skip results that are too dissimilar
                 if distance > (1 - min_relevance) * 2:
                     continue
 
                 similar.append({
-                    "text": doc,
-                    "metadata": metadata,
+                    "text": doc.page_content,
+                    "metadata": doc.metadata,
                     "distance": round(distance, 4),
                     "relevance": round(1 - distance / 2, 4),
                 })
@@ -157,12 +183,12 @@ class AlertMemory:
             logger.info(
                 "Retrieved %d similar alerts (of %d candidates)",
                 len(similar),
-                self.collection.count(),
+                self._count(),
             )
             return similar
 
         except Exception as e:
-            logger.error("Failed to query ChromaDB: %s", e)
+            logger.error("Failed to query Chroma: %s", e)
             return []
 
     def format_context_for_prompt(

@@ -1,6 +1,6 @@
 # Wazuh + LLM Security Triage
 
-An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh.com/) with Anthropic's Claude API for automated alert triage and proactive threat hunting. The system operates in two modes: **reactive triage** (individual high-severity alerts analyzed in real time) and **proactive hunting** (batch analysis of low-to-medium severity events to find attack patterns no single alert would reveal). All results are written to OpenSearch for review in the Wazuh Dashboard.
+An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh.com/) with Anthropic's Claude via the **LangChain** framework for automated alert triage and proactive threat hunting. The system operates in two modes: **reactive triage** (individual high-severity alerts analyzed in real time) and **proactive hunting** (batch analysis of low-to-medium severity events to find attack patterns no single alert would reveal). All results are written to OpenSearch for review in the Wazuh Dashboard.
 
 ### Key Features
 
@@ -9,9 +9,11 @@ An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh
 - **20 Custom Detection Rules** — Sysmon-powered rules for encoded PowerShell, LOLBin abuse, process masquerading, registry persistence, and more
 - **Threat Intelligence IOCs** — ChromaDB-backed indicator of compromise database injected into Claude's analysis context
 - **Detection-as-Code** — Claude suggests new Wazuh XML rules when it finds patterns that existing rules miss
-- **Structured Output** — Typed JSON via Anthropic's `tool_use` (not free text), enabling programmatic evaluation
+- **LangChain Framework** — All LLM interactions use LangChain chains with `ChatAnthropic` and `with_structured_output()`, providing a clean abstraction that's easy to extend or swap models
+- **Structured Output** — Typed Pydantic models validated via LangChain's `with_structured_output()` (not free text), enabling programmatic evaluation with Python type safety
 - **Evaluation Framework** — Labeled dataset with ground-truth scoring for severity accuracy, MITRE F1, and benign detection
-- **RAG Context** — Historical alert memory via ChromaDB gives Claude environment-specific context
+- **RAG Context** — Historical alert memory via LangChain's Chroma VectorStore gives Claude environment-specific context
+- **Pluggable Vector Store** — Choose between ChromaDB (local, zero-config) or Pinecone (cloud, production-scale) via a single environment variable
 - **Human Feedback Loop** — Analysts mark results as agree/disagree, corrections export as new ground truth
 - **Cost & Latency Metrics** — Per-call token tracking, USD cost estimation, and quality signal monitoring
 - **Experiment Tracking** — Systematic prompt engineering with reproducible comparison tables
@@ -39,9 +41,9 @@ An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh
                              │                          │
                              ▼                          ▼
                     ┌──────────────────────────────────────────────┐
-                    │              Claude API (Anthropic)          │
-                    │  structured JSON via tool_use                │
-                    │  + RAG context (ChromaDB)                    │
+                    │         Claude API via LangChain              │
+                    │  Pydantic models via with_structured_output  │
+                    │  + RAG context (Chroma/Pinecone)             │
                     │  + Threat Intel IOCs                         │
                     │  + Cost/latency metrics                      │
                     └──────────────────┬──────────────────────────-┘
@@ -69,7 +71,7 @@ An AI-augmented security monitoring system that pairs [Wazuh SIEM](https://wazuh
 
 This project goes beyond a basic API integration to demonstrate core ML engineering practices:
 
-**Structured Output via Tool Use** — Claude returns typed JSON (not free text) using Anthropic's `tool_use` feature. Every triage has consistent fields: severity enum, confidence float, MITRE technique objects, benign boolean flags. This enables programmatic evaluation and metric computation. See `llm-triage/schemas.py`.
+**Structured Output via LangChain** — Claude returns validated Pydantic models (not free text) using LangChain's `with_structured_output()`. Every triage has consistent fields: severity enum, confidence float, MITRE technique objects, benign boolean flags. This enables programmatic evaluation, IDE autocomplete, and type-safe metric computation. See `llm-triage/schemas.py`.
 
 **Evaluation Framework** — A labeled dataset of 10 security alerts with ground-truth severity, false positive likelihood, MITRE mappings, and benign/malicious classification. The eval runner (`llm-triage/eval/evaluate.py`) scores Claude's output against ground truth and computes accuracy, within-1 agreement, MITRE F1 scores, and benign detection rates. This is the foundation for measuring whether prompt changes actually improve performance.
 
@@ -79,7 +81,7 @@ This project goes beyond a basic API integration to demonstrate core ML engineer
 
 **Human-in-the-Loop Feedback** — Analysts can mark triage results as "agree," "disagree," or "partial" with optional severity/FP corrections. Feedback is stored in OpenSearch (`wazuh-llm-feedback` index) and can be exported as new evaluation dataset entries — closing the loop between model output and human ground truth. See `llm-triage/feedback.py`.
 
-**RAG Context Injection** — Optional retrieval-augmented generation using ChromaDB. Past alerts and their triage outcomes are embedded and stored locally. When a new alert arrives, similar historical alerts are retrieved and injected into the prompt, giving Claude environment-specific context like "this IP was flagged 3 times last week and confirmed benign." See `llm-triage/rag.py`.
+**RAG Context Injection** — Optional retrieval-augmented generation using LangChain's VectorStore abstraction (backed by ChromaDB or Pinecone). Past alerts and their triage outcomes are embedded and stored. When a new alert arrives, similar historical alerts are retrieved and injected into the prompt, giving Claude environment-specific context like "this IP was flagged 3 times last week and confirmed benign." See `llm-triage/rag.py` and `llm-triage/vectorstore.py`.
 
 ## Tech Stack
 
@@ -89,11 +91,12 @@ This project goes beyond a basic API integration to demonstrate core ML engineer
 | Endpoint Telemetry | Sysmon | Process creation, network, file, registry, DNS events |
 | Data Store | OpenSearch (via Wazuh Indexer) | Alert storage, triage results, hunt findings, feedback |
 | Web UI | Wazuh Dashboard | Visualization of alerts, triage, and hunt results |
-| AI Engine | Claude Sonnet/Opus 4.6 (Anthropic API) | Structured analysis via tool_use |
+| LLM Framework | LangChain | ChatAnthropic chains, structured output, VectorStore abstraction |
+| AI Engine | Claude Sonnet/Opus 4.6 (Anthropic API) | Structured analysis via Pydantic models |
 | Triage Service | Python 3.12 | Reactive alert triage with metrics and RAG |
 | Hunt Service | Python 3.12 | Proactive batch event analysis across 5 focus areas |
 | Threat Intel | Python 3.12 + ChromaDB | IOC management and context injection |
-| Vector DB | ChromaDB | RAG similarity search + IOC storage |
+| Vector DB | ChromaDB or Pinecone | RAG similarity search + IOC storage (pluggable) |
 | Infrastructure | Docker Compose | Single-node deployment of all services |
 
 ## Project Structure
@@ -122,14 +125,15 @@ wazuh-llm-security/
 │
 ├── llm-triage/
 │   ├── Dockerfile                   # Python 3.12-slim, non-root user
-│   ├── requirements.txt             # anthropic, requests, chromadb, pandas
+│   ├── requirements.txt             # langchain, anthropic, chromadb, pandas
 │   ├── triage_service.py            # Reactive: poll + triage individual alerts
 │   ├── hunt.py                      # Proactive: batch event analysis for threat hunting
 │   ├── threat_intel.py              # IOC feed management for RAG context
-│   ├── schemas.py                   # Structured output schema (Anthropic tool_use)
+│   ├── schemas.py                   # Pydantic models for structured output
 │   ├── metrics.py                   # Cost, latency, and quality tracking
 │   ├── feedback.py                  # Analyst feedback loop + export
-│   ├── rag.py                       # RAG context with ChromaDB
+│   ├── rag.py                       # RAG context via LangChain VectorStore
+│   ├── vectorstore.py               # Pluggable backend: ChromaDB or Pinecone
 │   ├── prompts/
 │   │   ├── triage_system.txt        # Reactive triage prompt (SOC analyst)
 │   │   └── hunt_system.txt          # Proactive hunt prompt (threat hunter)
@@ -348,6 +352,9 @@ All configuration is in `.env`:
 | `ALERT_LEVEL_THRESHOLD` | `10` | Minimum Wazuh rule level to triage (1-15) |
 | `POLL_INTERVAL_SECONDS` | `30` | How often to check for new alerts |
 | `RAG_ENABLED` | `false` | Enable ChromaDB context injection |
+| `VECTOR_STORE` | `chroma` | Vector store backend: `chroma` (local) or `pinecone` (cloud) |
+| `PINECONE_API_KEY` | — | Pinecone API key (required if `VECTOR_STORE=pinecone`) |
+| `PINECONE_INDEX_NAME` | `wazuh-alerts` | Pinecone index name |
 
 ### OpenSearch Indices
 
@@ -392,7 +399,7 @@ You can filter by severity, confidence, MITRE technique, or any other structured
 
 ## Sample Structured Output
 
-Claude returns typed JSON via Anthropic's `tool_use` feature:
+Claude returns validated Pydantic models via LangChain's `with_structured_output()`:
 
 ```json
 {

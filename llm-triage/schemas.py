@@ -233,10 +233,4 @@ def hunt_to_flat_text(hunt) -> str:
         lines.append("\n--- Suggested Detection Rules ---")
         for rule in h["recommended_rules"]:
             lines.append(f"  {rule['description']}")
-            if rule.get("wazuh_rule_xml"):
-                lines.append(f"  {rule['wazuh_rule_xml'][:200]}")
-
-    if h.get("patterns_checked"):
-        lines.append(f"\nPATTERNS CHECKED: {', '.join(h['patterns_checked'])}")
-
-    return "\n".join(lines)
+            if rul

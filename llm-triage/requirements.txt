@@ -24,5 +24,4 @@ sentence-transformers>=2.2.0
 # langchain-pinecone>=0.2.0
 # pinecone-client>=3.0.0
 
-# Evaluation — data analysis and visualization
-pandas>=2.0.0
+# Evaluation — data analysis and vi

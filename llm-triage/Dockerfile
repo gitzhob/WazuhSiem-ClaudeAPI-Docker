@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY triage_service.py .
 COPY schemas.py .
 COPY metrics.py .
+COPY callbacks.py .
 COPY feedback.py .
 COPY rag.py .
 COPY hunt.py .
@@ -34,4 +35,4 @@ RUN useradd --create-home appuser \
 USER appuser
 
 # Default command — run the polling loop
-CMD ["python", "-u", "triage_service.py"]
+CMD ["

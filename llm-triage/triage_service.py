@@ -37,6 +37,7 @@ from requests.auth import HTTPBasicAuth
 
 from schemas import TriageResult, triage_to_flat_text
 from metrics import MetricsTracker
+from callbacks import MetricsCallbackHandler
 from rag import AlertMemory
 
 # ---------------------------------------------------------------------------
@@ -210,6 +211,7 @@ class TriageClient:
 
         self.model = model
         self.metrics = MetricsTracker()
+        self.callback_handler = MetricsCallbackHandler(model=model)
         self.alert_memory = alert_memory
 
     def triage_alert(self, alert: dict) -> dict:
@@ -241,30 +243,29 @@ class TriageClient:
 
         timer = self.metrics.start_timer()
         try:
+            # Reset per-call metrics on the callback handler
+            self.callback_handler.reset_last()
+
             # chain.invoke() does everything:
             #   1. Fills the prompt template with {context} and {alert}
             #   2. Sends the formatted messages to Claude via ChatAnthropic
             #   3. Forces Claude to use tool_use with the TriageResult schema
             #   4. Parses the response into a TriageResult Pydantic model
             #
-            # Compare to the old version which needed:
-            #   message = client.messages.create(tools=[TRIAGE_TOOL], ...)
-            #   for block in message.content:
-            #       if block.type == "tool_use": triage_result = block.input
-            result: TriageResult = self.chain.invoke({
-                "context": context,
-                "alert": alert_text,
-            })
+            # The config={"callbacks": [...]} tells LangChain to fire our
+            # MetricsCallbackHandler on every LLM call in this chain.
+            # The handler captures token counts and cost automatically.
+            result: TriageResult = self.chain.invoke(
+                {"context": context, "alert": alert_text},
+                config={"callbacks": [self.callback_handler]},
+            )
 
             # Convert Pydantic model to dict for OpenSearch storage
-            # .model_dump() is Pydantic's method — like calling dict() but
-            # it handles nested models (LikelyCause, MitreAttack) properly.
             triage_result = result.model_dump()
 
-            # Record metrics — we need to get token usage from the LLM
-            # LangChain doesn't expose the raw API response by default,
-            # so we use the LLM's last response metadata for token counts.
-            api_response = _get_last_response_metadata(self.llm)
+            # Get token usage from the callback handler — it captured
+            # the data during the LLM call via on_llm_end()
+            api_response = self.callback_handler.get_usage_proxy()
             self.metrics.record_call(
                 timer, api_response, triage_result, alert, self.model
             )
@@ -306,35 +307,6 @@ class TriageClient:
         """
         result = self.triage_alert(alert)
         return triage_to_flat_text(result)
-
-
-def _get_last_response_metadata(llm):
-    """
-    Helper to extract token usage from LangChain's ChatAnthropic.
-
-    LangChain wraps the raw API response, so we create a lightweight
-    object that MetricsTracker.record_call() can read. This bridges
-    the gap between LangChain's abstraction and our metrics tracking.
-    """
-    class _UsageProxy:
-        """Mimics the anthropic API response shape for MetricsTracker."""
-        def __init__(self):
-            self.usage = None
-
-    proxy = _UsageProxy()
-
-    # ChatAnthropic stores metadata from the last call — but this
-    # depends on the LangChain version. If unavailable, metrics
-    # will show 0 tokens (graceful degradation, not a crash).
-    try:
-        # LangChain 0.3+ stores response metadata on invoke results
-        # For now, return a proxy that records no tokens — we'll
-        # enhance this when we add LangChain callbacks for metrics.
-        pass
-    except Exception:
-        pass
-
-    return proxy
 
 
 # ---------------------------------------------------------------------------
@@ -679,16 +651,14 @@ if __name__ == "__main__":
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if "--test" in sys.argv:
-        # Allow testing a specific alert: --test 0, --test 1, --test 2
-        # Or test all: --test
-        test_idx = sys.argv.index("--test")
-        if test_idx + 1 < len(sys.argv) and sys.argv[test_idx + 1].isdigit():
-            alert_num = int(sys.argv[test_idx + 1])
-            if alert_num >= len(SAMPLE_ALERTS):
-                print(f"Alert index {alert_num} out of range. Available: 0-{len(SAMPLE_ALERTS)-1}")
-                sys.exit(1)
-            run_test_mode(alert_index=alert_num)
-        else:
-            run_test_mode()
+        # Optional: specify alert index e.g. --test 0
+        idx = None
+        test_pos = sys.argv.index("--test")
+        if test_pos + 1 < len(sys.argv):
+            try:
+                idx = int(sys.argv[test_pos + 1])
+            except ValueError:
+                pass
+        run_test_mode(alert_index=idx)
     else:
         run_poll_loop()

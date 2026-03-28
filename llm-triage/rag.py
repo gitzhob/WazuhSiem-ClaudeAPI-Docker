@@ -262,10 +262,4 @@ class AlertMemory:
         """Generate a stable ID for deduplication."""
         key = json.dumps(
             {
-                "rule_id": alert.get("rule", {}).get("id"),
-                "full_log": alert.get("full_log", "")[:100],
-                "timestamp": alert.get("timestamp", ""),
-            },
-            sort_keys=True,
-        )
-        return hashlib.sha256(key.encode()).hexdigest()[:16]
+                "rule_id": a
